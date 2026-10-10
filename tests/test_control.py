@@ -63,7 +63,22 @@ def test_status_fields(tmp_path: Path) -> None:
         "session": "s",
         "frozen": False,
         "frozen_info": None,
+        "lockdown": False,
+        "lockdown_info": None,
         "global_stop": False,
         "global_stop_info": None,
         "state_dir": str(tmp_path),
     }
+
+
+def test_lockdown_roundtrip(tmp_path: Path) -> None:
+    control = SessionControl(tmp_path)
+    assert control.is_lockdown("agent") == (False, None)
+    control.lockdown("agent", reason="主动反制", by="guard:counterstrike")
+    locked, why = control.is_lockdown("agent")
+    assert locked and "主动反制" in str(why)
+    assert control.status("agent")["lockdown"] is True
+    assert control.list_lockdowns()[0]["session"] == "agent"
+    assert control.unlock("agent") is True
+    assert control.is_lockdown("agent") == (False, None)
+    assert control.unlock("agent") is False

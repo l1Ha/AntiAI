@@ -168,6 +168,8 @@ class Decision:
     requires_approval: bool = False
     advisory: bool = False
     approved: bool = False
+    decoy: Optional[str] = None
+    countermeasures: List[Dict[str, Any]] = field(default_factory=list)
     ts: float = field(default_factory=time.time)
 
     @property
@@ -175,7 +177,7 @@ class Decision:
         return "；".join(self.reasons) if self.reasons else "无（按默认策略处理）"
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "ts": self.ts,
             "session": self.action.session_id,
             "action": self.action.to_dict(),
@@ -189,3 +191,8 @@ class Decision:
             "matched_rules": list(self.matched_rules),
             "findings": [finding.to_dict() for finding in self.findings],
         }
+        if self.decoy is not None:
+            data["decoy_deployed"] = True
+        if self.countermeasures:
+            data["countermeasures"] = list(self.countermeasures)
+        return data

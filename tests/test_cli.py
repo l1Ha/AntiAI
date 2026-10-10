@@ -150,6 +150,20 @@ class TestLogAndStatus:
         out = capsys.readouterr().out
         assert "action" in out and "block" in out and "sudo" in out
 
+    def test_log_prints_countermeasure_events(self, tmp_path: Path, capsys) -> None:
+        """反制事件的 payload.action 是动作名（字符串），打印不能崩。"""
+        state = tmp_path / "state"
+        main(
+            [
+                "check", "--state-dir", str(state), "--session", "s",
+                "--tool", "shell.exec", "--command", "pkill -f antiai-guard",
+            ]
+        )
+        capsys.readouterr()
+        assert main(["log", "--state-dir", str(state), "--session", "s"]) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "countermeasure" in out and "lockdown" in out and "action" in out
+
     def test_log_json_output(self, tmp_path: Path, capsys) -> None:
         state = tmp_path / "state"
         main(["check", "--state-dir", str(state), "--tool", "file.read", "--path", "/tmp/a.md"])
@@ -191,3 +205,100 @@ class TestDemoCommand:
         assert main(["demo", "--state-dir", str(tmp_path / "state")]) == EXIT_OK
         out = capsys.readouterr().out
         assert "已冻结" in out and "demo-agent" in out and "外泄" in out
+
+    def test_demo_aggressive_runs(self, tmp_path: Path, capsys) -> None:
+        assert main(["demo", "--aggressive", "--state-dir", str(tmp_path / "state")]) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "主动反制" in out and "封锁" in out and "反制" in out and "蜜罐" in out
+
+
+class TestCountermeasureCommands:
+    def test_lockdown_unlock_flow(self, tmp_path: Path) -> None:
+        state = tmp_path / "state"
+        base = ["--state-dir", str(state), "--session", "a"]
+        assert main(["lockdown", *base, "--reason", "演习"]) == EXIT_OK
+        # 执行类被封锁 → 阻止
+        assert main(["check", *base, "--tool", "shell.exec", "--command", "ls"]) == EXIT_BLOCK
+        # 只读观察保留
+        assert main(["check", *base, "--tool", "file.read", "--path", "/tmp/x"]) == EXIT_OK
+        assert main(["unlock", *base]) == EXIT_OK
+        # 解锁后 shell 回到 review（需人工确认）
+        assert main(["check", *base, "--tool", "shell.exec", "--command", "ls"]) == EXIT_REVIEW
+
+    def test_honeytoken_plant_trip_and_report(self, tmp_path: Path, capsys) -> None:
+        state = tmp_path / "state"
+        target = tmp_path / "proj" / ".env"
+        assert (
+            main(["honeytoken", "plant", "--state-dir", str(state), "--path", str(target), "--session", "s"])
+            == EXIT_OK
+        )
+        assert target.exists() and "antiai-canary-" in target.read_text(encoding="utf-8")
+        capsys.readouterr()
+
+        assert main(["honeytoken", "list", "--state-dir", str(state), "--json"]) == EXIT_OK
+        tokens = json.loads(capsys.readouterr().out)
+        assert len(tokens) == 1 and tokens[0]["kind"] == "env"
+
+        # 触碰蜜罐 → 立即冻结（strike-on-honeytoken）
+        assert (
+            main(["check", "--state-dir", str(state), "--session", "s", "--tool", "file.read", "--path", str(target)])
+            == EXIT_FROZEN
+        )
+        capsys.readouterr()  # 清掉 check 的人类可读输出
+        assert main(["incidents", "--state-dir", str(state), "--json"]) == EXIT_OK
+        incidents = json.loads(capsys.readouterr().out)
+        assert len(incidents) == 1
+        assert incidents[0]["canaries"][0]["id"] == tokens[0]["id"]
+
+        assert main(["report", incidents[0]["id"], "--state-dir", str(state)]) == EXIT_OK
+        assert "事件报告" in capsys.readouterr().out
+        # 支持子串匹配
+        assert main(["report", "s-", "--state-dir", str(state)]) == EXIT_OK
+
+    def test_quarantine_list_and_restore(self, tmp_path: Path, capsys) -> None:
+        state = tmp_path / "state"
+        secret = tmp_path / "ws" / ".env"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("REAL=1\n", encoding="utf-8")
+        policy_path = tmp_path / "policy.json"
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "rules": [
+                        {"id": "block-env", "match": {"path": "**/.env"}, "verdict": "block", "severity": "high"}
+                    ],
+                    "countermeasures": {
+                        "enabled": True,
+                        "rules": [
+                            {
+                                "id": "q",
+                                "when": {"detectors": ["exfiltration"], "paths": [f"{tmp_path}/**"]},
+                                "actions": ["quarantine"],
+                            }
+                        ],
+                        "quarantine_paths": [f"{tmp_path}/**"],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert (
+            main(
+                [
+                    "check", "--state-dir", str(state), "--session", "q",
+                    "--policy", str(policy_path), "--tool", "file.read", "--path", str(secret),
+                ]
+            )
+            == EXIT_BLOCK
+        )
+        assert not secret.exists()  # 已移入保险库
+        capsys.readouterr()
+
+        assert main(["quarantine", "list", "--state-dir", str(state), "--json"]) == EXIT_OK
+        entries = json.loads(capsys.readouterr().out)
+        assert len(entries) == 1 and entries[0]["original_path"] == str(secret)
+        assert main(["quarantine", "restore", entries[0]["entry"], "--state-dir", str(state)]) == EXIT_OK
+        assert secret.exists()
+
+    def test_report_missing_id(self, tmp_path: Path) -> None:
+        assert main(["report", "nope", "--state-dir", str(tmp_path / "state")]) == EXIT_USAGE

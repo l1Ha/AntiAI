@@ -92,6 +92,44 @@ class SessionControl:
             return None
         return _read_json(path) or {"session": session, "reason": "（标志文件不可解析）", "by": "unknown"}
 
+    # ------------------------------------------------------------- 封锁（lockdown）
+
+    def _lockdown_path(self, session: str) -> Path:
+        return self.sessions_dir / f"{self._safe(session)}.lockdown"
+
+    def lockdown(self, session: str, reason: str = "主动封锁", by: str = "guard") -> Dict[str, Any]:
+        """封锁会话：禁止执行类工具与对外网络，保留只读观察。"""
+        info = {"session": session, "reason": reason, "by": by, "ts": time.time()}
+        _atomic_write_json(self._lockdown_path(session), info)
+        return info
+
+    def unlock(self, session: str) -> bool:
+        path = self._lockdown_path(session)
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    def lockdown_info(self, session: str) -> Optional[Dict[str, Any]]:
+        path = self._lockdown_path(session)
+        if not path.exists():
+            return None
+        return _read_json(path) or {"session": session, "reason": "（标志文件不可解析）", "by": "unknown"}
+
+    def is_lockdown(self, session: str = "default") -> Tuple[bool, Optional[str]]:
+        """返回 ``(是否处于封锁, 原因)``。"""
+        info = self.lockdown_info(session)
+        if info is None:
+            return False, None
+        return True, f"会话已被封锁（{info.get('reason', '未说明')}；操作者={info.get('by', 'unknown')}）"
+
+    def list_lockdowns(self) -> List[Dict[str, Any]]:
+        infos = []
+        for path in sorted(self.sessions_dir.glob("*.lockdown")):
+            session = path.name[: -len(".lockdown")]
+            infos.append(_read_json(path) or {"session": session, "reason": "（标志文件不可解析）", "by": "unknown"})
+        return infos
+
     def list_frozen(self) -> List[Dict[str, Any]]:
         infos = []
         for path in sorted(self.sessions_dir.glob("*.frozen")):
@@ -157,10 +195,13 @@ class SessionControl:
     def status(self, session: str = "default") -> Dict[str, Any]:
         info = self.frozen_info(session)
         global_info = self.global_stop_info()
+        lock_info = self.lockdown_info(session)
         return {
             "session": session,
             "frozen": info is not None,
             "frozen_info": info,
+            "lockdown": lock_info is not None,
+            "lockdown_info": lock_info,
             "global_stop": global_info is not None,
             "global_stop_info": global_info,
             "state_dir": str(self.state_dir),

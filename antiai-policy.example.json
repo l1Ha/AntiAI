@@ -122,5 +122,91 @@
       "severity": "medium",
       "reason": "执行类工具默认需人工确认"
     }
-  ]
+  ],
+  "countermeasures": {
+    "enabled": true,
+    "rules": [
+      {
+        "id": "evidence-on-freeze",
+        "description": "会话被自动冻结时固定证据并告警",
+        "when": {
+          "freeze_triggered": true
+        },
+        "actions": [
+          "evidence",
+          "alert"
+        ]
+      },
+      {
+        "id": "lockdown-on-critical-attack",
+        "description": "针对护栏/监护进程的 critical 攻击 → 立即封锁（禁执行、断网，保留只读观察）",
+        "when": {
+          "detectors": [
+            "tamper",
+            "self_preservation"
+          ],
+          "min_severity": "critical"
+        },
+        "actions": [
+          "lockdown",
+          "evidence",
+          "alert"
+        ]
+      },
+      {
+        "id": "strike-on-honeytoken",
+        "description": "触碰蜜罐凭据 → 立即冻结、取证、告警，并尝试终止被管进程",
+        "when": {
+          "detectors": [
+            "honeytoken"
+          ]
+        },
+        "actions": [
+          "freeze",
+          "evidence",
+          "alert",
+          "terminate"
+        ]
+      },
+      {
+        "id": "quarantine-on-exfil",
+        "description": "确认级外泄 → 把涉密文件移入隔离保险库（默认关闭，确认隔离清单后再启用）",
+        "when": {
+          "detectors": [
+            "exfiltration"
+          ],
+          "min_severity": "critical"
+        },
+        "actions": [
+          "quarantine",
+          "evidence",
+          "alert"
+        ],
+        "enabled": false
+      }
+    ],
+    "quarantine_paths": [
+      "**/.env",
+      "**/.env.*",
+      "**/.ssh/id_*",
+      "**/*.pem",
+      "**/*.key",
+      "**/.aws/**",
+      "**/.git-credentials",
+      "**/credentials*"
+    ],
+    "terminate": {
+      "enabled": false,
+      "pattern": "",
+      "dry_run": true
+    }
+  },
+  "deception": {
+    "enabled": false,
+    "decoys": {
+      "**/.env": "env",
+      "**/id_rsa": "ssh",
+      "**/.aws/credentials": "aws"
+    }
+  }
 }

@@ -49,14 +49,44 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 from .adapters import enrich_action, normalize_action
 from .audit import AuditLog
 from .control import SessionControl, safe_session_name
-from .detectors import Detector, SessionState, build_detectors
+from .counterstrike import CounterStrike, CountermeasureResult
+from .detectors import Detector, HoneytokenDetector, SessionState, build_detectors, is_exec_like
 from .errors import ActionBlocked, SessionFrozen
+from .honeytokens import Honeytoken, HoneytokenRegistry
 from .models import Action, Decision, Finding, Severity, Verdict, most_restrictive
-from .policy import Policy, Rule, load_policy
+from .policy import Policy, Rule, glob_any, load_policy
 
 __all__ = ["Guard", "GuardedShell", "ShellResult", "default_state_dir"]
 
 Approver = Callable[[Action, List[str]], bool]
+Hook = Callable[..., Any]
+
+# 封锁（lockdown）状态下受限的工具：执行类 + 对外网络类
+_LOCKDOWN_EGRESS_GLOBS = (
+    "http.*",
+    "https.*",
+    "web.*",
+    "net.*",
+    "fetch*",
+    "request*",
+    "curl*",
+    "download*",
+    "upload*",
+    "ssh*",
+    "scp*",
+    "ftp*",
+    "mail*",
+    "smtp*",
+)
+
+
+def _restricted_under_lockdown(action: Action) -> bool:
+    """封锁状态下被禁止的动作类型：执行类工具、对外网络、带主机的调用。"""
+    if is_exec_like(action.tool):
+        return True
+    if action.host:
+        return True
+    return glob_any(action.tool, _LOCKDOWN_EGRESS_GLOBS)
 
 
 def default_state_dir() -> Path:
@@ -89,6 +119,8 @@ class Guard:
         advisory: bool = False,
         audit: bool = True,
         persist_counters: bool = True,
+        hooks: Optional[Dict[str, Hook]] = None,
+        aggressive: Optional[bool] = None,
     ) -> None:
         self.policy = policy if policy is not None else load_policy()
         self.state_dir = Path(state_dir).expanduser() if state_dir else default_state_dir()
@@ -98,6 +130,18 @@ class Guard:
         self.persist_counters = persist_counters
         self.control = SessionControl(self.state_dir)
         self.detectors: List[Detector] = build_detectors(self.policy)
+        self.honeytokens = HoneytokenRegistry(self.state_dir)
+        if self.policy.detector_enabled("honeytoken"):
+            self.detectors.append(HoneytokenDetector(self.honeytokens))
+        self.counterstrike = CounterStrike(
+            state_dir=self.state_dir,
+            control=self.control,
+            policy=self.policy,
+            hooks=hooks,
+            registry=self.honeytokens,
+            audit=self._write_audit,
+            enabled=aggressive,
+        )
         self._states: Dict[str, SessionState] = {}
         self._audit_logs: Dict[str, AuditLog] = {}
         self._lock = threading.RLock()
@@ -193,8 +237,21 @@ class Guard:
         # 1) 规则裁决
         rule_verdict, winning_rules = self.policy.decide_rules(act)
 
-        # 2) 检测器扫描（异常时 fail-closed）
+        # 2) 检测器扫描（异常时 fail-closed）；封锁状态先注入硬限制项
         findings: List[Finding] = []
+        lockdown_active, lockdown_reason = self.control.is_lockdown(session)
+        if lockdown_active and not self.advisory and _restricted_under_lockdown(act):
+            findings.append(
+                Finding(
+                    detector="lockdown",
+                    reason=(
+                        f"{lockdown_reason}；执行类工具与对外网络在封锁解除前一律阻止"
+                        f"（解除：antiai unlock --session {session}）"
+                    ),
+                    severity=Severity.CRITICAL,
+                    verdict=Verdict.BLOCK,
+                )
+            )
         for detector in self.detectors:
             try:
                 findings.extend(detector.check(act, state, self.policy))
@@ -230,6 +287,19 @@ class Guard:
             allowed = approved
         if self.advisory:
             allowed = True
+
+        # 4.5) 诱饵投放（deception）：被阻止的窃取动作"拿到"假凭据，攻击方以为得手
+        decoy: Optional[str] = None
+        if not allowed and not self.advisory and self.policy.deception_enabled():
+            decoy_kind = self.policy.decoy_for(act.path)
+            if decoy_kind:
+                token, decoy = self.honeytokens.render_and_register(
+                    decoy_kind, path=str(act.path), session=session
+                )
+                reasons.append(
+                    f"[诱饵] 已投放 canary 诱饵 {token.id}（{decoy_kind}）"
+                    "—— 该内容一旦被外发或使用即可精确溯源"
+                )
 
         # 5) 计数与冻结升级（计数跨进程持久化：一次性 CLI 门禁同样参与累计）
         now = time.time()
@@ -289,7 +359,20 @@ class Guard:
             requires_approval=requires_approval,
             approved=approved,
             advisory=self.advisory,
+            decoy=decoy,
         )
+
+        # 6) 主动反制：封锁 / 冻结 / 隔离 / 取证 / 告警 / 终止（观察模式不执行）
+        if not self.advisory:
+            results: List[CountermeasureResult] = self.counterstrike.respond(session, decision, state)
+            if results:
+                decision.countermeasures = [result.to_dict() for result in results]
+                if any(
+                    result.action == "freeze" and result.status == "applied" for result in results
+                ):
+                    decision.frozen = True
+                    decision.reasons.append("[反制] 会话已被主动冻结")
+
         self._write_audit(session, "action", decision)
         return decision
 
@@ -356,6 +439,8 @@ class Guard:
                 decision = self.evaluate(action)
                 if not decision.allowed:
                     if on_block == "return":
+                        if decision.decoy is not None:
+                            return decision.decoy  # 诱饵投放：攻击方"拿到"假内容，实则已被标记
                         return {
                             "blocked": True,
                             "verdict": decision.verdict.value,
@@ -397,6 +482,20 @@ class Guard:
             self._write_audit(session, "release", {"by": by, "session": session})
         return released
 
+    def lockdown(self, reason: str = "人工封锁", *, session_id: Optional[str] = None, by: str = "human") -> Dict[str, Any]:
+        """封锁会话：禁止执行类工具与对外网络，保留只读观察。"""
+        session = session_id or self.session_id
+        info = self.control.lockdown(session, reason=reason, by=by)
+        self._write_audit(session, "lockdown", info)
+        return info
+
+    def unlock(self, *, session_id: Optional[str] = None, by: str = "human") -> bool:
+        session = session_id or self.session_id
+        unlocked = self.control.unlock(session)
+        if unlocked:
+            self._write_audit(session, "unlock", {"by": by, "session": session})
+        return unlocked
+
     def status(self, *, session_id: Optional[str] = None) -> Dict[str, Any]:
         session = session_id or self.session_id
         state = self.state(session)
@@ -408,6 +507,11 @@ class Guard:
                 "allowed": state.allowed,
                 "policy_source": self.policy.source_path or "<内置默认策略>",
                 "detectors": [detector.name for detector in self.detectors],
+                "countermeasures": {
+                    "enabled": self.counterstrike.enabled(),
+                    "rules": [str(rule.get("id")) for rule in self.policy.countermeasure_rules()],
+                },
+                "honeytokens": len(self.honeytokens.load()),
             }
         )
         log = self._audit_for(session)

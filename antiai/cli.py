@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import unicodedata
@@ -27,6 +28,8 @@ from .control import SessionControl, safe_session_name
 from .demo import run_demo
 from .errors import AntiaiError, PolicyError
 from .guard import Guard, default_state_dir
+from .honeytokens import TEMPLATES as HONEYTOKEN_TEMPLATES
+from .honeytokens import HoneytokenRegistry
 from .models import Action, Decision, Verdict
 from .policy import DEFAULT_POLICY, load_policy, validate_policy
 
@@ -75,6 +78,15 @@ def _print_decision(decision: Decision, guard: Optional[Guard] = None) -> None:
     print("依据：")
     for reason in decision.reasons or ["（无）"]:
         print(f"  - {reason}")
+    if decision.decoy is not None:
+        print("诱饵：已投放 canary 诱饵（攻击方拿到的是假凭据；该内容一旦外发即可溯源）")
+    if decision.countermeasures:
+        print("反制：")
+        for item in decision.countermeasures:
+            print(
+                f"  - [{item.get('rule')}/{item.get('action')}] "
+                f"{item.get('status')}：{item.get('detail', '')}"
+            )
     if guard is not None:
         path = guard.state_dir / "audit" / f"{safe_session_name(decision.action.session_id)}.jsonl"
         print(f"审计：{path}")
@@ -82,16 +94,27 @@ def _print_decision(decision: Decision, guard: Optional[Guard] = None) -> None:
 
 def _print_audit_record(record: Dict[str, Any]) -> None:
     payload = record.get("payload") or {}
-    verdict = payload.get("verdict", "-") if isinstance(payload, dict) else "-"
-    action = (payload.get("action") or {}) if isinstance(payload, dict) else {}
-    action_text = str(action.get("tool", ""))
-    for key in ("command", "path", "host"):
-        if action.get(key):
-            action_text += f" | {key}={action[key]}"
-            break
+    if not isinstance(payload, dict):
+        payload = {}
+    verdict = payload.get("verdict", "-")
+    raw_action = payload.get("action")
+    if isinstance(raw_action, dict):
+        action_text = str(raw_action.get("tool", ""))
+        for key in ("command", "path", "host"):
+            if raw_action.get(key):
+                action_text += f" | {key}={raw_action[key]}"
+                break
+    elif isinstance(raw_action, str):
+        # 反制事件：payload.action 是反制动作名（如 freeze / lockdown）
+        rule = payload.get("rule")
+        action_text = f"{rule}/{raw_action}" if rule else raw_action
+    else:
+        action_text = ""
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(record.get("ts", 0) or 0)))
     print(f"#{record.get('seq')}  {ts}  {record.get('event')}  {verdict}  {action_text}".rstrip())
-    reasons = payload.get("reasons") or [] if isinstance(payload, dict) else []
+    reasons = payload.get("reasons") or []
+    if not reasons and payload.get("detail"):
+        reasons = [payload["detail"]]  # 反制 / 冻结事件的说明
     for reason in reasons[:4]:
         print(f"      └ {reason}")
 
@@ -179,6 +202,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         session_id=args.session,
         advisory=args.advisory,
         persist_counters=not args.stateless,
+        aggressive=False if args.stateless else None,
     )
     decision = guard.evaluate(action)
     if args.json:
@@ -218,11 +242,17 @@ def _cmd_eval_json(args: argparse.Namespace) -> int:
 
 def _cmd_demo(args: argparse.Namespace) -> int:
     policy = load_policy(args.policy) if args.policy else None
-    report = run_demo(policy=policy, state_dir=args.state_dir)
-    print(
-        f"ANTIAI 演示：模拟一个试图反击的 AI 智能体"
-        f"（默认策略 + 自动冻结阈值 {report['freeze_after_blocks']} 次）"
-    )
+    report = run_demo(policy=policy, state_dir=args.state_dir, aggressive=args.aggressive)
+    if report["aggressive"]:
+        print(
+            "ANTIAI 主动反制演示：不止挡住，还要还击"
+            "（封锁 / 取证 / 告警 / 终止钩子 / 隔离 / 蜜罐诱饵 / 内容级溯源）"
+        )
+    else:
+        print(
+            f"ANTIAI 演示：模拟一个试图反击的 AI 智能体"
+            f"（默认策略 + 自动冻结阈值 {report['freeze_after_blocks']} 次）"
+        )
     print(f"会话：{report['session']}　状态目录：{report['state_dir']}")
     print("─" * 78)
     for row in report["rows"]:
@@ -230,19 +260,42 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         if row.frozen:
             tag = f"{tag}/冻结"
         print(f"[{row.index:>2}] {_pad(tag, 10)} {row.label}")
-        for reason in row.reasons[:2]:
+        for reason in row.reasons[:3]:
             print(f"     └ {reason}")
+        for item in row.countermeasures:
+            print(
+                f"     ⚔ 反制 [{item.get('rule')}/{item.get('action')}] "
+                f"{item.get('status')}：{item.get('detail', '')}"
+            )
         if row.note:
             print(f"     ※ {row.note}")
     print("─" * 78)
-    frozen_info = report["status"].get("frozen_info") or {}
-    print(f"结果：会话 {report['session']} 已冻结 —— {frozen_info.get('reason', '')}")
     state_dir = report["state_dir"]
-    print("后续操作：")
-    print(f"  antiai log    --session {report['session']} --state-dir {state_dir}            # 查看审计")
-    print(f"  antiai log    --session {report['session']} --state-dir {state_dir} --verify   # 校验审计哈希链")
-    print(f"  antiai status --session {report['session']} --state-dir {state_dir}            # 查看状态")
-    print(f"  antiai release --session {report['session']} --state-dir {state_dir}           # 人工解除冻结")
+    if report["aggressive"]:
+        lock_info = report["status"].get("lockdown_info") or {}
+        print(f"结果：会话 {report['session']} 处于封锁状态 —— {lock_info.get('reason', '')}")
+        print(
+            f"      蜜罐凭据 {len(report['honeytokens'])} 只　事件报告 {len(report['incidents'])} 份　"
+            f"隔离 {len(report.get('quarantined', []))} 项　"
+            f"终止钩子调用 {report['hooks_called'].get('terminate', 0)} 次　"
+            f"告警 {report['hooks_called'].get('alert', 0)} 次"
+        )
+        for incident in report["incidents"][-2:]:
+            print(f"      事件报告：{incident}")
+        print("后续操作：")
+        print(f"  antiai incidents --session {report['session']} --state-dir {state_dir}      # 列出全部事件报告")
+        print(f"  antiai report <事件id> --state-dir {state_dir}                              # 阅读完整报告")
+        print(f"  antiai quarantine list --state-dir {state_dir}                              # 查看隔离保险库")
+        print(f"  antiai unlock --session {report['session']} --state-dir {state_dir}         # 人工解除封锁")
+    else:
+        frozen_info = report["status"].get("frozen_info") or {}
+        print(f"结果：会话 {report['session']} 已冻结 —— {frozen_info.get('reason', '')}")
+        print("后续操作：")
+        print(f"  antiai log    --session {report['session']} --state-dir {state_dir}            # 查看审计")
+        print(f"  antiai log    --session {report['session']} --state-dir {state_dir} --verify   # 校验审计哈希链")
+        print(f"  antiai status --session {report['session']} --state-dir {state_dir}            # 查看状态")
+        print(f"  antiai release --session {report['session']} --state-dir {state_dir}           # 人工解除冻结")
+        print("提示：antiai demo --aggressive 可查看主动反制（封锁/取证/蜜罐/诱饵）演示")
     return EXIT_OK
 
 
@@ -286,6 +339,10 @@ def _cmd_status(args: argparse.Namespace) -> int:
     counters = control.read_counters(args.session)
     if counters:
         info["counters"] = counters
+    tokens = HoneytokenRegistry(state_dir).load()
+    incidents = sorted((state_dir / "incidents").glob("*.md"))
+    info["honeytokens"] = len(tokens)
+    info["incidents"] = len(incidents)
     if args.json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return EXIT_OK
@@ -296,6 +353,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"会话冻结：是（原因：{frozen_info.get('reason', '')}；操作者：{frozen_info.get('by', '')}）")
     else:
         print("会话冻结：否")
+    if info.get("lockdown"):
+        lock_info = info.get("lockdown_info") or {}
+        print(
+            f"会话封锁：是（原因：{lock_info.get('reason', '')}；"
+            f"解除：antiai unlock --session {info['session']}）"
+        )
+    else:
+        print("会话封锁：否")
     if info["global_stop"]:
         stop_info = info["global_stop_info"] or {}
         print(f"全局停机：是（原因：{stop_info.get('reason', '')}）")
@@ -306,6 +371,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             f"拦截计数：累计拦截 {counters.get('blocked', 0)} 次　放行 {counters.get('allowed', 0)} 次　"
             f"需确认 {counters.get('reviewed', 0)} 次"
         )
+    print(f"蜜罐凭据：{info['honeytokens']} 只　事件报告：{info['incidents']} 份")
     counts = info["audit_counts"]
     print(f"审计：{info['audit_path']}")
     print(
@@ -342,6 +408,9 @@ def _cmd_release(args: argparse.Namespace) -> int:
         print(f"已解除会话冻结：{args.session}（拦截计数已清零）")
     else:
         print(f"会话 {args.session} 当前未处于冻结状态（拦截计数已清零）")
+    control_status = control.status(args.session)
+    if control_status.get("lockdown"):
+        print(f"注意：该会话仍处于封锁状态，解除：antiai unlock --session {args.session}")
     return EXIT_OK
 
 
@@ -365,13 +434,197 @@ def _cmd_resume_all(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 封锁 / 蜜罐 / 事件报告 / 隔离保险库
+# --------------------------------------------------------------------------- #
+
+def _cmd_lockdown(args: argparse.Namespace) -> int:
+    state_dir = _state_dir(args)
+    control = SessionControl(state_dir)
+    info = control.lockdown(args.session, reason=args.reason, by=args.by)
+    _control_log(state_dir).append("lockdown", session=args.session, payload=info)
+    print(f"已封锁会话：{args.session}（原因：{args.reason}；操作者：{args.by}）")
+    print("执行类工具与全部对外网络将被阻止，只读观察保留。")
+    print(f"解除：antiai unlock --session {args.session}")
+    return EXIT_OK
+
+
+def _cmd_unlock(args: argparse.Namespace) -> int:
+    state_dir = _state_dir(args)
+    control = SessionControl(state_dir)
+    unlocked = control.unlock(args.session)
+    _control_log(state_dir).append("unlock", session=args.session, payload={"unlocked": unlocked, "by": args.by})
+    print(f"已解除会话封锁：{args.session}" if unlocked else f"会话 {args.session} 当前未处于封锁状态。")
+    return EXIT_OK
+
+
+def _cmd_honeytoken_plant(args: argparse.Namespace) -> int:
+    state_dir = _state_dir(args)
+    registry = HoneytokenRegistry(state_dir)
+    try:
+        token = registry.plant(
+            args.path, kind=args.kind, session=args.session, overwrite=args.overwrite
+        )
+    except FileExistsError as exc:
+        print(f"无法投放：{exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"已投放诱饵：{token.path}")
+    print(f"  canary 编号：{token.id}（内容含 ANTIAI-CANARY-{token.id}）")
+    print("提示：把诱饵放到被管对象会去翻的位置（项目根目录、工作区、~/.aws 等）——它一碰就暴露。")
+    return EXIT_OK
+
+
+def _cmd_honeytoken_list(args: argparse.Namespace) -> int:
+    registry = HoneytokenRegistry(_state_dir(args))
+    tokens = registry.load()
+    if args.json:
+        print(json.dumps([token.to_dict() for token in tokens], ensure_ascii=False, indent=2))
+        return EXIT_OK
+    if not tokens:
+        print("（尚未投放任何诱饵。投放：antiai honeytoken plant）")
+        return EXIT_OK
+    print(f"共 {len(tokens)} 只诱饵：")
+    for token in tokens:
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(token.created))
+        print(f"  - {token.path}")
+        print(
+            f"    canary {token.id}　类型 {token.kind}　投放会话 {token.session}　{stamp}"
+            + (f"　{token.note}" if token.note else "")
+        )
+    return EXIT_OK
+
+
+def _cmd_incidents(args: argparse.Namespace) -> int:
+    state_dir = _state_dir(args)
+    incidents_dir = state_dir / "incidents"
+    records: List[Dict[str, Any]] = []
+    for path in sorted(incidents_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and (not args.session or data.get("session") == args.session):
+            records.append(data)
+    records.sort(key=lambda item: float(item.get("ts", 0) or 0), reverse=True)
+    if args.tail:
+        records = records[: int(args.tail)]
+    if args.json:
+        print(json.dumps(records, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    if not records:
+        print(f"（无事件报告：{incidents_dir}）")
+        return EXIT_OK
+    for data in records:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(data.get("ts", 0) or 0)))
+        print(
+            f"[{data.get('id')}] {stamp}　{data.get('severity')}/{data.get('verdict')}　"
+            f"工具={data.get('action', {}).get('tool')}　触发规则={data.get('rule')}"
+        )
+        canaries = data.get("canaries") or []
+        if canaries:
+            print(f"    ⚑ 蜜罐命中：" + ", ".join(str(item.get("id")) for item in canaries))
+        for item in (data.get("countermeasures") or [])[:4]:
+            print(f"    - {item.get('action')}: {item.get('status')}　{str(item.get('detail', ''))[:80]}")
+    print()
+    print(f"共 {len(records)} 份。查看完整报告：antiai report <事件id> --state-dir {state_dir}")
+    return EXIT_OK
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    incidents_dir = _state_dir(args) / "incidents"
+    report_path = incidents_dir / f"{args.id}.md"
+    if not report_path.exists():
+        matches = sorted(incidents_dir.glob(f"*{args.id}*.md"))
+        if len(matches) == 1:
+            report_path = matches[0]
+        elif not matches:
+            print(f"未找到事件报告：{args.id}（目录：{incidents_dir}）", file=sys.stderr)
+            return EXIT_USAGE
+        else:
+            print(
+                "匹配到多份报告，请给出更完整的 id："
+                + ", ".join(path.stem for path in matches[:5]),
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+    print(report_path.read_text(encoding="utf-8"))
+    return EXIT_OK
+
+
+def _cmd_quarantine_list(args: argparse.Namespace) -> int:
+    state_dir = _state_dir(args)
+    vault_root = state_dir / "quarantine"
+    entries: List[Dict[str, Any]] = []
+    for meta_path in sorted(vault_root.glob("*/meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        meta.setdefault("entry", meta_path.parent.name)
+        entries.append(meta)
+    if args.json:
+        print(json.dumps(entries, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    if not entries:
+        print(f"（隔离保险库为空：{vault_root}）")
+        return EXIT_OK
+    print(f"隔离保险库共 {len(entries)} 项：")
+    for meta in entries:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(meta.get("ts", 0) or 0)))
+        print(f"  - [{meta.get('entry')}] 原路径={meta.get('original_path')}　会话={meta.get('session')}　{stamp}")
+    print(f"恢复：antiai quarantine restore <entry> --state-dir {state_dir}")
+    return EXIT_OK
+
+
+def _cmd_quarantine_restore(args: argparse.Namespace) -> int:
+    state_dir = _state_dir(args)
+    entry_dir = state_dir / "quarantine" / args.entry
+    meta_path = entry_dir / "meta.json"
+    if not meta_path.exists():
+        print(f"未找到隔离条目：{args.entry}", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    payloads = [path for path in entry_dir.iterdir() if path.name != "meta.json"]
+    if not payloads:
+        print(f"隔离条目为空：{entry_dir}", file=sys.stderr)
+        return EXIT_ERROR
+    source = payloads[0]
+    target = (
+        Path(args.to).expanduser()
+        if args.to
+        else Path(str(meta.get("original_path") or source.name)).expanduser()
+    )
+    if target.exists():
+        print(f"目标已存在，未覆盖：{target}（可加 --to 指定其他位置）", file=sys.stderr)
+        return EXIT_USAGE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(str(source), str(target))
+    try:
+        entry_dir.rmdir()
+    except OSError:
+        pass
+    _control_log(state_dir).append(
+        "quarantine_restore",
+        session=str(meta.get("session", "-")),
+        payload={"entry": args.entry, "restored_to": str(target)},
+    )
+    print(f"已恢复：{target}")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
 # 解析器
 # --------------------------------------------------------------------------- #
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="antiai",
-        description="ANTIAI —— AI / 智能体行为防护护栏：拦截越权、自保、外泄与对抗性反击行为。",
+        description=(
+            "ANTIAI —— AI / 智能体行为防护护栏：拦截越权、自保、外泄与对抗性反击行为，"
+            "并按策略主动反制（封锁 / 取证 / 告警 / 隔离 / 终止 / 蜜罐诱饵）。"
+        ),
         epilog="退出码：0 放行 / 2 用法或策略错误 / 3 需人工确认 / 4 阻止 / 5 会话已冻结（含本次触发冻结）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -400,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument(
         "--stateless",
         action="store_true",
-        help="无状态判定：不读写拦截计数，不参与自动冻结累计（仍尊重已有的冻结标志）",
+        help="无状态判定：不读写拦截计数、不触发反制动作（仍写审计、仍尊重冻结/封锁）",
     )
     p_check.add_argument("--json", action="store_true", help="输出完整判定 JSON")
     p_check.set_defaults(func=_cmd_check)
@@ -415,6 +668,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_demo = sub.add_parser("demo", help="运行内置演示（模拟 AI 反击 → 护栏拦截 → 冻结）")
     p_demo.add_argument("--policy", help="策略文件路径（默认使用内置演示策略）")
     p_demo.add_argument("--state-dir", help="状态目录")
+    p_demo.add_argument(
+        "--aggressive",
+        action="store_true",
+        help="主动反制演示：封锁 / 取证 / 告警 / 终止钩子 / 隔离 / 蜜罐诱饵 / 内容级溯源",
+    )
     p_demo.set_defaults(func=_cmd_demo)
 
     p_log = sub.add_parser("log", help="查看 / 校验审计日志")
@@ -455,6 +713,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("--state-dir", help="状态目录")
     p_resume.add_argument("--by", default="human:cli", help="操作者标识")
     p_resume.set_defaults(func=_cmd_resume_all)
+
+    p_lockdown = sub.add_parser("lockdown", help="封锁会话：禁执行、断网，保留只读观察")
+    p_lockdown.add_argument("--session", required=True, help="会话名")
+    p_lockdown.add_argument("--state-dir", help="状态目录")
+    p_lockdown.add_argument("--reason", default="人工封锁", help="封锁原因")
+    p_lockdown.add_argument("--by", default="human:cli", help="操作者标识")
+    p_lockdown.set_defaults(func=_cmd_lockdown)
+
+    p_unlock = sub.add_parser("unlock", help="解除会话封锁")
+    p_unlock.add_argument("--session", required=True, help="会话名")
+    p_unlock.add_argument("--state-dir", help="状态目录")
+    p_unlock.add_argument("--by", default="human:cli", help="操作者标识")
+    p_unlock.set_defaults(func=_cmd_unlock)
+
+    p_honeytoken = sub.add_parser("honeytoken", help="蜜罐凭据：投放 / 查看诱饵（碰了就知道）")
+    honeytoken_sub = p_honeytoken.add_subparsers(dest="honeytoken_command", required=True)
+    ht_plant = honeytoken_sub.add_parser("plant", help="投放一只诱饵（写入假凭据文件并登记）")
+    ht_plant.add_argument("--path", help="诱饵文件路径（默认 ./antiai-honeypot/<默认文件名>）")
+    ht_plant.add_argument("--kind", default="env", choices=sorted(HONEYTOKEN_TEMPLATES), help="诱饵类型")
+    ht_plant.add_argument("--session", default="default", help="归属会话名")
+    ht_plant.add_argument("--state-dir", help="状态目录")
+    ht_plant.add_argument("--overwrite", action="store_true", help="覆盖已存在的文件")
+    ht_plant.set_defaults(func=_cmd_honeytoken_plant)
+    ht_list = honeytoken_sub.add_parser("list", help="列出已投放的诱饵")
+    ht_list.add_argument("--state-dir", help="状态目录")
+    ht_list.add_argument("--json", action="store_true", help="输出 JSON")
+    ht_list.set_defaults(func=_cmd_honeytoken_list)
+
+    p_incidents = sub.add_parser("incidents", help="列出主动反制生成的事件报告")
+    p_incidents.add_argument("--state-dir", help="状态目录")
+    p_incidents.add_argument("--session", help="只显示指定会话")
+    p_incidents.add_argument("--tail", type=int, help="只显示最近 N 份")
+    p_incidents.add_argument("--json", action="store_true", help="输出 JSON")
+    p_incidents.set_defaults(func=_cmd_incidents)
+
+    p_report = sub.add_parser("report", help="查看某份事件报告（Markdown 全文）")
+    p_report.add_argument("id", help="事件 id（支持子串匹配）")
+    p_report.add_argument("--state-dir", help="状态目录")
+    p_report.set_defaults(func=_cmd_report)
+
+    p_quarantine = sub.add_parser("quarantine", help="隔离保险库：查看 / 恢复被隔离的涉密文件")
+    quarantine_sub = p_quarantine.add_subparsers(dest="quarantine_command", required=True)
+    q_list = quarantine_sub.add_parser("list", help="列出隔离条目")
+    q_list.add_argument("--state-dir", help="状态目录")
+    q_list.add_argument("--json", action="store_true", help="输出 JSON")
+    q_list.set_defaults(func=_cmd_quarantine_list)
+    q_restore = quarantine_sub.add_parser("restore", help="把隔离的文件恢复到原路径")
+    q_restore.add_argument("entry", help="隔离条目名（见 quarantine list）")
+    q_restore.add_argument("--to", help="恢复到指定路径（默认恢复原路径）")
+    q_restore.add_argument("--state-dir", help="状态目录")
+    q_restore.set_defaults(func=_cmd_quarantine_restore)
 
     return parser
 

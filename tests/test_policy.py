@@ -190,6 +190,98 @@ class TestLoading:
         assert policy.source_path == "<内置默认策略>"
 
 
+class TestCountermeasurePolicy:
+    def test_default_policy_has_countermeasures(self) -> None:
+        policy = default_policy()
+        assert policy.countermeasures_enabled() is True
+        ids = [str(rule.get("id")) for rule in policy.countermeasure_rules()]
+        assert "strike-on-honeytoken" in ids
+        assert "lockdown-on-critical-attack" in ids
+        assert policy.quarantine_paths()
+        assert policy.terminate_config().get("enabled") is False
+        assert policy.terminate_config().get("dry_run") is True
+        assert policy.deception_enabled() is False
+
+    def test_decoy_for_matches_globs(self, policy_factory) -> None:
+        policy = policy_factory(deception={"enabled": True, "decoys": {"**/.env": "env"}})
+        assert policy.decoy_for("/srv/app/.env") == "env"
+        assert policy.decoy_for("/srv/app/notes.md") is None
+        assert policy.decoy_for(None) is None
+
+    def test_non_dict_blocks_rejected(self) -> None:
+        with pytest.raises(PolicyError, match="countermeasures"):
+            policy_from_dict({"countermeasures": []})
+        with pytest.raises(PolicyError, match="deception"):
+            policy_from_dict({"deception": []})
+        with pytest.raises(PolicyError, match="countermeasures.rules"):
+            policy_from_dict({"countermeasures": {"rules": "x"}})
+
+    def test_validate_unknown_countermeasure_action(self) -> None:
+        problems = validate_policy(
+            {
+                "rules": [],
+                "countermeasures": {
+                    "enabled": True,
+                    "rules": [{"id": "x", "when": {"detectors": ["tamper"]}, "actions": ["nuke"]}],
+                },
+            }
+        )
+        assert any("未知反制动作" in problem for problem in problems)
+
+    def test_validate_unknown_when_key_and_severity(self) -> None:
+        problems = validate_policy(
+            {
+                "rules": [],
+                "countermeasures": {
+                    "enabled": True,
+                    "rules": [
+                        {"id": "x", "when": {"mystery": 1, "min_severity": "extreme"}, "actions": ["alert"]}
+                    ],
+                },
+            }
+        )
+        assert any("未知触发条件" in problem for problem in problems)
+        assert any("非法 min_severity" in problem for problem in problems)
+
+    def test_validate_duplicate_countermeasure_ids(self) -> None:
+        problems = validate_policy(
+            {
+                "rules": [],
+                "countermeasures": {
+                    "enabled": True,
+                    "rules": [
+                        {"id": "dup", "when": {"detectors": ["tamper"]}, "actions": ["alert"]},
+                        {"id": "dup", "when": {"detectors": ["tamper"]}, "actions": ["alert"]},
+                    ],
+                },
+            }
+        )
+        assert any("规则 id 重复" in problem for problem in problems)
+
+    def test_validate_enabled_without_rules_and_bad_decoy_kind(self) -> None:
+        problems = validate_policy(
+            {
+                "rules": [],
+                "countermeasures": {"enabled": True, "rules": []},
+                "deception": {"enabled": True, "decoys": {"**/.env": "not-a-template"}},
+            }
+        )
+        assert any("未定义任何规则" in problem for problem in problems)
+        assert any("未知诱饵模板" in problem for problem in problems)
+
+    def test_validate_empty_when_is_rejected(self) -> None:
+        problems = validate_policy(
+            {
+                "rules": [],
+                "countermeasures": {
+                    "enabled": True,
+                    "rules": [{"id": "x", "when": {}, "actions": ["alert"]}],
+                },
+            }
+        )
+        assert any("when 必须是非空对象" in problem for problem in problems)
+
+
 class TestValidate:
     def test_validate_default_ok(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)

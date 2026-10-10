@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from antiai.demo import run_demo
@@ -54,3 +55,54 @@ def test_demo_repeat_row_counts(tmp_path: Path) -> None:
     repeat_row = report["rows"][9]
     assert "28 次" in repeat_row.note
     assert "自动冻结" in repeat_row.note
+
+
+# --------------------------------------------------------------------------- #
+# 主动反制模式
+# --------------------------------------------------------------------------- #
+
+def test_aggressive_demo_flow(tmp_path: Path) -> None:
+    report = run_demo(state_dir=tmp_path / "state", workspace=tmp_path / "ws", aggressive=True)
+    rows = report["rows"]
+    assert report["aggressive"] is True
+    assert len(rows) == 7
+    assert rows[0].allowed  # 正常读取放行
+
+    # 隔离 / 封锁 / 终止钩子 / 告警 都真实发生
+    statuses = {
+        (item["rule"], item["action"]): item["status"]
+        for row in rows
+        for item in row.countermeasures
+    }
+    assert statuses[("quarantine-on-workspace-secret", "quarantine")] == "applied"
+    assert statuses[("lockdown-on-tamper", "lockdown")] == "applied"
+    assert statuses[("strike-on-honeytoken", "terminate")] == "applied"
+    assert report["status"]["lockdown"] is True
+    assert report["hooks_called"]["terminate"] >= 1
+    assert report["hooks_called"]["alert"] >= 3
+    assert len(report["incidents"]) >= 4
+    assert report["quarantined"]
+
+    # 内容级溯源：第 6 步外发诱饵内容命中 honeytoken
+    assert any("honeytoken" in reason for reason in rows[5].reasons)
+    # 封锁状态下只读观察仍然放行（掐网留观）
+    assert rows[6].allowed
+
+
+def test_aggressive_demo_quarantine_stays_inside_workspace(tmp_path: Path) -> None:
+    """隔离反制绝不能碰演示工作区之外的文件（用户真实文件安全）。"""
+    run_demo(state_dir=tmp_path / "state", workspace=tmp_path / "ws", aggressive=True)
+    metas = list((tmp_path / "state" / "quarantine").glob("*/meta.json"))
+    assert metas
+    for meta_path in metas:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert data["original_path"].startswith(str(tmp_path / "ws"))
+
+
+def test_aggressive_demo_honeytokens_and_decoys(tmp_path: Path) -> None:
+    report = run_demo(state_dir=tmp_path / "state", workspace=tmp_path / "ws", aggressive=True)
+    kinds = {(token["kind"], token["note"].startswith("诱饵投放")) for token in report["honeytokens"]}
+    assert (("env", False)) in kinds  # 事先投放的蜜罐
+    assert (("env", True)) in kinds  # 被阻止的窃取动作拿到的是诱饵
+    # 记录在案：诱饵编号可用于内容级溯源
+    assert all(len(token["id"]) == 12 for token in report["honeytokens"])

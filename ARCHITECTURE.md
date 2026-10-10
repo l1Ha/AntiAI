@@ -9,19 +9,24 @@
    (adapters 归一化) │  0. control.is_blocked(会话)                   │
                     │     ├─ 全局停机 / 会话冻结 → block(frozen) 直接返回│
                     │     └─ 否则继续                                 │
+                    │  0.5 control.is_lockdown(会话)                 │
+                    │     └─ 封锁中且动作属于执行/网络类 → 注入阻断项    │
                     │  1. policy.decide_rules(action)                │
                     │     → 最高 priority 档内取最强判定               │
                     │  2. 逐个检测器 check(action, state, policy)      │
-                    │     → findings（命中即硬约束）                   │
+                    │     → findings（命中即硬约束；含蜜罐路径/内容级）  │
                     │  3. 合成：most_restrictive(规则 + findings)      │
                     │     → 无输入时 default_verdict（默认 review）     │
                     │  4. review → approver 回调（异常视为不批准）      │
+                    │  4.5 未放行 + deception 开启 → 投放 canary 诱饵   │
                     │  5. 计数：block 达到阈值 → control.freeze(自动)   │
-                    │  6. audit.append(完整 Decision)                │
+                    │  6. counterstrike.respond(decision, state)     │
+                    │     → 封锁/冻结/隔离/取证/告警/终止（逐条审计）     │
+                    │  7. audit.append(完整 Decision)                │
                     └───────────────┬────────────────────────────────┘
                                     ▼
-                      Decision{verdict, allowed, reasons, findings,
-                               matched_rules, frozen, requires_approval}
+                      Decision{verdict, allowed, reasons, findings, matched_rules,
+                               frozen, requires_approval, decoy, countermeasures}
 ```
 
 ## 模块职责
@@ -30,12 +35,14 @@
 | :--- | :--- | :--- |
 | `models.py` | 动作/发现/判定的数据模型，动作指纹 | 纯数据，无 I/O |
 | `adapters.py` | 把 dict / OpenAI 工具调用 / 字符串归一化为 `Action`，提取 command/path/host | 不解析命令内容（那是检测器的事） |
-| `policy.py` | 规则匹配语义、决胜规则、策略加载与校验、默认策略 | 校验期失败要给出可定位的中文错误 |
-| `detectors.py` | 七类行为检测器 + 会话状态（重复计数、冷却、敏感访问时间戳） | 每个检测器只做一件事；异常由 Guard 兜底为阻断 |
-| `control.py` | 冻结标志 / 全局停机标志的读写（原子写） | 文件化，保证跨进程与"AI 之外"的解除途径 |
+| `policy.py` | 规则匹配语义、决胜规则、策略加载与校验、默认策略、反制与诱饵配置 | 校验期失败要给出可定位的中文错误 |
+| `detectors.py` | 八类行为检测器（含蜜罐）+ 会话状态（重复计数、冷却、敏感访问时间戳） | 每个检测器只做一件事；异常由 Guard 兜底为阻断 |
+| `honeytokens.py` | 蜜罐凭据：投放诱饵文件、canary 登记表、内容/路径检索、诱饵内容模板 | 诱饵全部是假凭据，不含任何真实密钥 |
+| `counterstrike.py` | 主动反制引擎：条件匹配、六种反制动作、事件报告（JSON+Markdown） | 反制失败不影响判定主流程；已放行动作不反制 |
+| `control.py` | 冻结 / 封锁 / 全局停机标志的读写（原子写） | 文件化，保证跨进程与"AI 之外"的解除途径 |
 | `audit.py` | JSONL 追加 + sha256 哈希链 + 校验 + 统计 | 内存缓存最后一条记录，避免每次追加都全量读 |
-| `guard.py` | 判定流水线、会话状态管理、装饰器、GuardedShell | fail-closed；检测器不可被 allow 规则漂白 |
-| `demo.py` | 内置演示脚本（11 步，覆盖七类行为 + 失控 + 冻结后试探） | 复用真实 Guard，不做假判定 |
+| `guard.py` | 判定流水线、会话状态管理、装饰器、GuardedShell、hooks 注入 | fail-closed；检测器不可被 allow 规则漂白 |
+| `demo.py` | 内置演示：防御模式（11 步覆盖七类行为 + 失控 + 冻结后试探）与主动反制模式 | 复用真实 Guard，不做假判定 |
 | `cli.py` | 全部子命令，退出码即结论 | 人类输出与 `--json` 输出分离 |
 
 ## 关键设计决策
@@ -49,15 +56,17 @@
    需要放行时只有两种正道：提高对应规则 priority 以覆盖**规则**判定，
    或在策略里显式禁用/调参**检测器**（这是一个显式、可审计的决定）。
 
-3. **五级升级阶梯与自动冻结**
-   `allow → review → block → freeze → stop-all`。
+3. **六级升级阶梯与自动冻结**
+   `allow → review → block → lockdown → freeze → stop-all`。
    拦截计数持久化在 `<状态目录>/sessions/<会话>.state.json`（时间窗内保留最近 100 个拦截时刻），
-   冻结标志在 `sessions/<会话>.frozen`——前者让**多次独立的一次性进程调用**（如脚本里的
-   `antiai check` 门禁）也能累计试探次数，后者跨进程可读、可被外部监督进程写入。
+   冻结/封锁标志在 `sessions/<会话>.{frozen,lockdown}`——前者让**多次独立的一次性进程调用**
+   （如脚本里的 `antiai check` 门禁）也能累计试探次数，后者跨进程可读、可被外部监督进程写入。
    窗口内拦截数达到 `session.freeze_after_blocks` 时 Guard 自动冻结：
    这是对"持续试探、换姿势重试"的最终反制；解除只能人工，且解除会清零计数。
    计数持久化是"最后写入者胜"（并发多进程下计数可能少计，冻结标志文件则为原子语义），
    高并发场景建议单点 Guard 或容器内单会话串行化。
+   封锁（lockdown）是介于 block 与 freeze 之间的一档：掐掉执行与对外网络、保留只读观察，
+   用于"先控制住、再取证"的主动反制场景。
 
 4. **审计哈希链**
    每条记录 `hash = sha256(prev_hash ‖ canonical(body))`。
@@ -67,6 +76,23 @@
 5. **归一化而非内容解析**
    适配器只负责把"动作"映射到 `tool/command/path/host/args` 五个维度；
    对命令文本的语义判断全部集中在检测器，便于独立测试与调参。
+
+6. **主动反制：条件是数据，动作是副作用**
+   反制规则（条件 → 动作列表）完全由策略描述，引擎只负责评估与执行；
+   条件支持检测器/严重级/判定/冻结触发/窗口计数/路径范围六个维度，
+   **路径范围（`paths`）是破坏性动作（隔离）的安全阀**——可把作用面锁死在指定目录内。
+   规则默认每会话触发一次（`repeat` 可开），避免告警风暴；
+   已放行的动作（含人工批准）不反制，避免"批了又抢"的矛盾行为；
+   反制异常一律降级为 `failed` 结果并继续判定主流程（反制绝不反噬护栏本身）。
+   `terminate` 与 `alert` 通过 hooks 把真实能力（docker kill / systemctl stop / webhook）
+   留给部署侧注入：护栏只做判定与编排，不内置任何"杀进程"默认行为。
+
+7. **蜜罐与诱饵：双触发 + 可溯源**
+   蜜罐触发有两条独立通道：**路径级**（动作命中已登记诱饵文件，含命令文本提到该路径）
+   与**内容级**（动作携带/外发 canary 标记）。canary 正则以字面量 `antiai-canary-<12hex>`
+   与伪装成 AWS key id 的 `AKIA<12hex>` 两种形式匹配，并用否定断言避免误伤真实凭据格式。
+   诱饵投放（deception）复用同一套登记表：被阻止的窃取动作"拿到"的假凭据内嵌新 canary，
+   因此攻击方后续任何使用/外发都会被精确指认到具体诱饵与会话。
 
 6. **状态隔离**
    所有会话级状态以 `session_id` 为键：`SessionState`（内存计数）、

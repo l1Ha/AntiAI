@@ -170,6 +170,53 @@ DEFAULT_POLICY: Dict[str, Any] = {
             "reason": "执行类工具默认需人工确认",
         },
     ],
+    # 主动反制：检测到攻击性行为后不止阻止，而是立刻封锁 / 取证 / 告警 / 隔离 / 终止
+    "countermeasures": {
+        "enabled": True,
+        "rules": [
+            {
+                "id": "evidence-on-freeze",
+                "description": "会话被自动冻结时固定证据并告警",
+                "when": {"freeze_triggered": True},
+                "actions": ["evidence", "alert"],
+            },
+            {
+                "id": "lockdown-on-critical-attack",
+                "description": "针对护栏/监护进程的 critical 攻击 → 立即封锁（禁执行、断网，保留只读观察）",
+                "when": {"detectors": ["tamper", "self_preservation"], "min_severity": "critical"},
+                "actions": ["lockdown", "evidence", "alert"],
+            },
+            {
+                "id": "strike-on-honeytoken",
+                "description": "触碰蜜罐凭据 → 立即冻结、取证、告警，并尝试终止被管进程",
+                "when": {"detectors": ["honeytoken"]},
+                "actions": ["freeze", "evidence", "alert", "terminate"],
+            },
+            {
+                "id": "quarantine-on-exfil",
+                "description": "确认级外泄 → 把涉密文件移入隔离保险库（默认关闭，确认隔离清单后再启用）",
+                "when": {"detectors": ["exfiltration"], "min_severity": "critical"},
+                "actions": ["quarantine", "evidence", "alert"],
+                "enabled": False,
+            },
+        ],
+        "quarantine_paths": [
+            "**/.env",
+            "**/.env.*",
+            "**/.ssh/id_*",
+            "**/*.pem",
+            "**/*.key",
+            "**/.aws/**",
+            "**/.git-credentials",
+            "**/credentials*",
+        ],
+        "terminate": {"enabled": False, "pattern": "", "dry_run": True},
+    },
+    # 诱饵投放：被阻止的窃取动作"拿到"蜜罐内容，攻击方以为得手，实则全程可溯源
+    "deception": {
+        "enabled": False,
+        "decoys": {"**/.env": "env", "**/id_rsa": "ssh", "**/.aws/credentials": "aws"},
+    },
 }
 
 KNOWN_MATCH_KEYS = ("tool", "path", "host", "command")
@@ -292,6 +339,8 @@ class Policy:
     session: Dict[str, Any] = field(default_factory=dict)
     disabled_detectors: List[str] = field(default_factory=list)
     detector_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    countermeasures: Dict[str, Any] = field(default_factory=dict)
+    deception: Dict[str, Any] = field(default_factory=dict)
     source_path: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -339,6 +388,41 @@ class Policy:
 
     def detector_param(self, detector: str, key: str, default: Any) -> Any:
         return self.detector_params.get(detector, {}).get(key, default)
+
+    # ---- 主动反制 / 诱饵 ----
+
+    def countermeasures_enabled(self) -> bool:
+        return bool(self.countermeasures.get("enabled", False))
+
+    def countermeasure_rules(self) -> List[Dict[str, Any]]:
+        rules = self.countermeasures.get("rules", []) or []
+        return [rule for rule in rules if isinstance(rule, dict)]
+
+    def quarantine_paths(self) -> List[str]:
+        raw = self.countermeasures.get("quarantine_paths", []) or []
+        return [str(item) for item in raw] if isinstance(raw, (list, tuple)) else []
+
+    def terminate_config(self) -> Dict[str, Any]:
+        config = self.countermeasures.get("terminate", {}) or {}
+        return dict(config) if isinstance(config, dict) else {}
+
+    def deception_enabled(self) -> bool:
+        return bool(self.deception.get("enabled", False))
+
+    def decoy_map(self) -> Dict[str, str]:
+        decoys = self.deception.get("decoys", {}) or {}
+        if not isinstance(decoys, dict):
+            return {}
+        return {str(pattern): str(kind) for pattern, kind in decoys.items()}
+
+    def decoy_for(self, path: Optional[str]) -> Optional[str]:
+        """返回该路径应投放的诱饵模板名（未命中返回 None）。"""
+        if not path:
+            return None
+        for pattern, kind in self.decoy_map().items():
+            if path_matches(path, [pattern]):
+                return kind
+        return None
 
     def to_dict(self) -> Dict[str, Any]:
         data = copy.deepcopy(self.raw) if self.raw else {}
@@ -433,11 +517,15 @@ def policy_from_dict(data: Dict[str, Any], source: Optional[str] = None) -> Poli
             )
         )
 
-    protected = data.get("protected", {}) or {}
+    protected = data.get("protected")
+    if protected is None:
+        protected = {}
     if not isinstance(protected, dict):
         raise PolicyError("protected 必须是对象")
 
-    detectors = data.get("detectors", {}) or {}
+    detectors = data.get("detectors")
+    if detectors is None:
+        detectors = {}
     if not isinstance(detectors, dict):
         raise PolicyError("detectors 必须是对象")
     disabled = detectors.get("disabled", []) or []
@@ -447,7 +535,9 @@ def policy_from_dict(data: Dict[str, Any], source: Optional[str] = None) -> Poli
     if not isinstance(params, dict):
         raise PolicyError("detectors.params 必须是对象")
 
-    session = data.get("session", {}) or {}
+    session = data.get("session")
+    if session is None:
+        session = {}
     if not isinstance(session, dict):
         raise PolicyError("session 必须是对象")
 
@@ -460,6 +550,24 @@ def policy_from_dict(data: Dict[str, Any], source: Optional[str] = None) -> Poli
         except re.error as exc:
             raise PolicyError(f"always_block_commands 正则非法: {pattern!r}（{exc}）") from None
 
+    countermeasures = data.get("countermeasures")
+    if countermeasures is None:
+        countermeasures = {}
+    if not isinstance(countermeasures, dict):
+        raise PolicyError("countermeasures 必须是对象")
+    rules_raw = countermeasures.get("rules", []) or []
+    if not isinstance(rules_raw, list):
+        raise PolicyError("countermeasures.rules 必须是数组")
+
+    deception = data.get("deception")
+    if deception is None:
+        deception = {}
+    if not isinstance(deception, dict):
+        raise PolicyError("deception 必须是对象")
+    decoys_raw = deception.get("decoys", {}) or {}
+    if not isinstance(decoys_raw, dict):
+        raise PolicyError("deception.decoys 必须是对象（路径通配 → 诱饵模板名）")
+
     return Policy(
         version=version,
         default_verdict=default_verdict,
@@ -470,6 +578,8 @@ def policy_from_dict(data: Dict[str, Any], source: Optional[str] = None) -> Poli
         session=dict(session),
         disabled_detectors=[str(name) for name in disabled],
         detector_params={str(k): dict(v) for k, v in params.items() if isinstance(v, dict)},
+        countermeasures=copy.deepcopy(countermeasures),
+        deception=copy.deepcopy(deception),
         source_path=source,
         raw=copy.deepcopy(data),
     )
@@ -577,5 +687,60 @@ def validate_policy(source: Union[str, Path, Dict[str, Any], None] = None) -> Li
         if name not in KNOWN_DETECTORS:
             problems.append(
                 f"detectors.params 中存在未知检测器 {name!r}，可选: {', '.join(KNOWN_DETECTORS)}"
+            )
+
+    # 主动反制 / 诱饵 lint
+    from .counterstrike import KNOWN_COUNTERMEASURE_ACTIONS, KNOWN_WHEN_KEYS
+
+    cm_rules = parsed.countermeasure_rules()
+    if parsed.countermeasures_enabled() and not cm_rules:
+        problems.append("countermeasures.enabled=true 但未定义任何规则（rules 为空）")
+    seen_cm_ids: List[str] = []
+    for index, rule in enumerate(cm_rules):
+        where = f"countermeasures.rules[{index}]"
+        rule_id = str(rule.get("id", "")).strip()
+        if not rule_id:
+            problems.append(f"{where}: 缺少 id")
+        elif rule_id in seen_cm_ids:
+            problems.append(f"{where}: 规则 id 重复: {rule_id}")
+        else:
+            seen_cm_ids.append(rule_id)
+        actions = rule.get("actions")
+        if not isinstance(actions, list) or not actions:
+            problems.append(f"{where}: actions 必须是非空数组")
+        else:
+            for action in actions:
+                if str(action) not in KNOWN_COUNTERMEASURE_ACTIONS:
+                    problems.append(
+                        f"{where}: 未知反制动作 {action!r}，可选: {', '.join(KNOWN_COUNTERMEASURE_ACTIONS)}"
+                    )
+        when = rule.get("when")
+        if not isinstance(when, dict) or not when:
+            problems.append(f"{where}: when 必须是非空对象（空条件永不触发）")
+        else:
+            for key in when:
+                if key not in KNOWN_WHEN_KEYS:
+                    problems.append(f"{where}: 未知触发条件 {key!r}，可选: {', '.join(KNOWN_WHEN_KEYS)}")
+            if "min_severity" in when:
+                try:
+                    Severity(str(when["min_severity"]))
+                except ValueError:
+                    problems.append(f"{where}: 非法 min_severity {when['min_severity']!r}")
+            if "detectors" in when:
+                wanted = when["detectors"]
+                wanted = [wanted] if isinstance(wanted, str) else list(wanted or [])
+                for name in wanted:
+                    if str(name) not in KNOWN_DETECTORS:
+                        problems.append(f"{where}: 未知检测器 {name!r}")
+
+    if parsed.deception_enabled() and not parsed.decoy_map():
+        problems.append("deception.enabled=true 但 decoys 为空（没有可投放的诱饵）")
+    from .honeytokens import TEMPLATES as _DECOY_TEMPLATES
+
+    for pattern, kind in parsed.decoy_map().items():
+        if kind not in _DECOY_TEMPLATES:
+            problems.append(
+                f"deception.decoys[{pattern!r}]: 未知诱饵模板 {kind!r}，"
+                f"可选: {', '.join(_DECOY_TEMPLATES)}"
             )
     return problems

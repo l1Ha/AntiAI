@@ -41,6 +41,7 @@ KNOWN_DETECTORS = [
     "evasion",
     "runaway",
     "dangerous_command",
+    "honeytoken",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -94,7 +95,7 @@ _EXEC_TOKENS = (
 )
 
 
-def _is_exec_like(tool: str) -> bool:
+def is_exec_like(tool: str) -> bool:
     low = (tool or "").lower()
     return any(token in low for token in _EXEC_TOKENS)
 
@@ -108,7 +109,7 @@ def _text_of(action: Action, *, include_args: bool = False) -> str:
     parts: List[str] = []
     if action.command:
         parts.append(action.command)
-    if include_args or _is_exec_like(action.tool):
+    if include_args or is_exec_like(action.tool):
         for value in action.args.values():
             if isinstance(value, str):
                 parts.append(value)
@@ -692,6 +693,62 @@ class DangerousCommandDetector(Detector):
                 )
             ]
         return []
+
+
+# --------------------------------------------------------------------------- #
+# 8. 蜜罐凭据（Honeytoken）
+# --------------------------------------------------------------------------- #
+
+class HoneytokenDetector(Detector):
+    """蜜罐凭据被触碰：诱饵内容出现在动作目标里 → 确认攻击意图并溯源。
+
+    需要外部注入登记表（:class:`~antiai.honeytokens.HoneytokenRegistry`），
+    因此不在 ``DETECTOR_CLASSES`` 默认列表中，由 :class:`~antiai.guard.Guard` 装配。
+    """
+
+    name = "honeytoken"
+    description = "检测诱饵凭据（canary）被读取、携带或外发"
+
+    def __init__(self, registry: Any) -> None:
+        self.registry = registry
+
+    def check(self, action: Action, state: SessionState, policy: Policy) -> List[Finding]:
+        text = "\n".join(
+            part for part in (_text_of(action, include_args=True), action.path or "") if part
+        )
+        canary_ids = self.registry.find(text)
+        path_hits = self.registry.match_paths(action.path, text)
+        if not canary_ids and not path_hits:
+            return []
+
+        canaries: List[Dict[str, Any]] = []
+        seen_ids = set()
+        for item in self.registry.describe(canary_ids) + [token.to_dict() for token in path_hits]:
+            if item.get("id") not in seen_ids:
+                seen_ids.add(item.get("id"))
+                canaries.append(item)
+        content_ids = set(canary_ids)
+        # 路径命中的诱饵（内容编号可能尚未出现在动作里，单独列出）
+        content_hits = [item for item in canaries if item.get("id") in content_ids]
+        path_only = [item for item in canaries if item.get("id") not in content_ids]
+
+        details_bits: List[str] = []
+        if content_hits:
+            details_bits.append(
+                "携带/外发诱饵内容：" + ", ".join(f"{item.get('id')}（{item.get('path')}）" for item in content_hits)
+            )
+        if path_only:
+            details_bits.append(
+                "触碰诱饵文件：" + ", ".join(f"{item.get('path')}（{item.get('kind')}）" for item in path_only)
+            )
+        return [
+            self._finding(
+                Severity.CRITICAL,
+                "触碰蜜罐凭据 —— " + "；".join(details_bits) + "。正常作业不会读取诱饵，确认攻击意图",
+                canaries=canaries,
+                matched_by=["content" if content_hits else None, "path" if path_only else None],
+            )
+        ]
 
 
 # --------------------------------------------------------------------------- #

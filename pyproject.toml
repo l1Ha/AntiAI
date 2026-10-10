@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antiai"
-version = "0.1.0"
+version = "0.2.0"
 description = "ANTIAI —— 面向 AI / 智能体的行为防护护栏：拦截越权、自保、外泄与对抗性反击行为"
 readme = "README.md"
 requires-python = ">=3.9"

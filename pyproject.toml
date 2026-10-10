@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antiai"
+version = "0.1.0"
+description = "ANTIAI —— 面向 AI / 智能体的行为防护护栏：拦截越权、自保、外泄与对抗性反击行为"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "l1Ha" }]
+keywords = ["ai-safety", "guardrail", "agent", "security", "audit", "policy", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+yaml = ["PyYAML>=5.0"]
+
+[project.urls]
+Homepage = "https://github.com/l1Ha/ANTIAI"
+Repository = "https://github.com/l1Ha/ANTIAI"
+Issues = "https://github.com/l1Ha/ANTIAI/issues"
+
+[project.scripts]
+antiai = "antiai.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["antiai*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+addopts = "-q"

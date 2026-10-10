@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+.idea/
+.vscode/
+.antiai/
+.antiai-example/
+antiai-policy.json

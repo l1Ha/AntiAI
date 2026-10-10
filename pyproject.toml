@@ -30,9 +30,9 @@ dev = ["pytest>=7.0"]
 yaml = ["PyYAML>=5.0"]
 
 [project.urls]
-Homepage = "https://github.com/l1Ha/ANTIAI"
-Repository = "https://github.com/l1Ha/ANTIAI"
-Issues = "https://github.com/l1Ha/ANTIAI/issues"
+Homepage = "https://github.com/l1Ha/AntiAI"
+Repository = "https://github.com/l1Ha/AntiAI"
+Issues = "https://github.com/l1Ha/AntiAI/issues"
 
 [project.scripts]
 antiai = "antiai.cli:main"

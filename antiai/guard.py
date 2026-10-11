@@ -459,6 +459,13 @@ class Guard:
         """返回受护栏约束的 Shell 执行器。"""
         return GuardedShell(self, session_id=session_id or self.session_id, timeout=timeout)
 
+    @property
+    def decoys(self) -> "DecoyFactory":
+        """假情报生成器：生成诱饵文档包 / 提示词片段，canary 自动登记、可溯源。"""
+        from .decoys import DecoyFactory
+
+        return DecoyFactory(self.honeytokens, session=self.session_id)
+
     # ------------------------------------------------------------------ 冻结管理
 
     def freeze(self, reason: str = "人工冻结", *, session_id: Optional[str] = None, by: str = "human") -> Dict[str, Any]:

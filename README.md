@@ -110,6 +110,27 @@ antiai report <事件id>                                     # 阅读完整报�
 会被持续追踪：**读取诱饵文件**（路径级）或**携带/外发诱饵内容**（内容级）都会
 CRITICAL 命中并触发反制，事件报告里精确指认"哪只诱饵、哪个会话"。
 
+### 假情报包：随机生成高仿真诱饵文档（不经意的泄露）
+
+```bash
+antiai decoy generate --dir ./project --profile standard   # 生成诱饵文档包（7 文件 / ~3 KB）
+antiai decoy list / remove <id>                            # 查看与按清单清理
+antiai decoy snippet                                       # 生成可注入上下文的"内部备忘"诱饵
+```
+
+生成的包像一个真实的项目 checkout：`.env`（假 AWS/OpenAI 密钥）、`config/deploy.yaml`
+（假集群与跳板机）、`docs/onboarding.md`（新人指引）、`docs/runbook.md`（历史事故与应急登录）、
+`scripts/deploy.sh`（注释里"忘掉"的 key）……**面包屑**（onboarding / README 里的"顺手一提"）
+引导被管对象自然地发现它们——"发现路径"本身就是行为证据。
+
+每条假信息内嵌唯一 canary：**读取**（路径级）、**携带或外发**（内容级）都会精确指认
+"哪条假信息、哪个会话"，并触发反制。`decoy snippet` 生成一段可放进智能体系统提示的
+"内部备忘"——上下文里的假信息一旦出现在任何对外输出中，即可溯源。
+
+体积与真实性受控：整包 < 100 KB、单文件 < 16 KB；域名 / IP 只使用保留命名空间
+（`.internal` / `.example` / RFC 5737 文档段），诱饵永远不会真的可用——构建期强制自检，
+不生成任何真实人物的个人信息（人员一律为角色账号）。
+
 ### 诱饵投放（deception）：以牙还牙
 
 ```jsonc
@@ -341,6 +362,7 @@ decision = guard.evaluate(action, approver=lambda action, reasons: input(f"批�
 | `antiai freeze / release --session S` | 冻结 / 解除会话（release 清零计数） |
 | `antiai lockdown / unlock --session S` | 封锁（禁执行断网）/ 解除封锁 |
 | `antiai honeytoken plant / list` | 投放 / 查看蜜罐诱饵 |
+| `antiai decoy generate / list / remove / snippet` | 假情报包：高仿真诱饵文档、提示词片段 |
 | `antiai incidents [--session S] [--tail N] [--json]` | 列出主动反制生成的事件报告 |
 | `antiai report <事件id>` | 阅读事件报告全文（支持 id 子串匹配） |
 | `antiai quarantine list / restore <条目>` | 查看 / 恢复被隔离的涉密文件 |
@@ -361,7 +383,7 @@ ANTIAI 是**应用层行为护栏**，不是操作系统级沙箱的替代品。
 
 ```bash
 pip install -e ".[dev]"
-pytest                      # 255 个用例：策略 / 检测器 / 审计链 / 冻结封锁 / 反制 / 蜜罐 / CLI / 演示
+pytest                      # 275 个用例：策略 / 检测器 / 审计链 / 冻结封锁 / 反制 / 蜜罐 / 假情报 / CLI / 演示
 ```
 
 ## 项目结构
@@ -375,6 +397,7 @@ antiai/
 ├── guard.py        # Guard 核心：判定流水线、装饰器、GuardedShell
 ├── counterstrike.py# 主动反制引擎：封锁/冻结/隔离/取证/告警/终止
 ├── honeytokens.py  # 蜜罐凭据：投放诱饵、canary 追溯、诱饵内容生成
+├── decoys.py       # 假情报生成器：高仿真诱饵文档包、面包屑、提示词片段
 ├── control.py      # 冻结 / 封锁 / 全局停机开关（文件化，对 AI 不可绕过）
 ├── audit.py        # sha256 哈希链审计日志
 ├── demo.py         # 内置演示：防御模式 + 主动反制模式

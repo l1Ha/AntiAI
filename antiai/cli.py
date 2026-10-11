@@ -25,6 +25,7 @@ from . import __version__
 from .adapters import normalize_action
 from .audit import AuditLog
 from .control import SessionControl, safe_session_name
+from .decoys import PROFILES, DecoyFactory
 from .demo import run_demo
 from .errors import AntiaiError, PolicyError
 from .guard import Guard, default_state_dir
@@ -273,9 +274,12 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     state_dir = report["state_dir"]
     if report["aggressive"]:
         lock_info = report["status"].get("lockdown_info") or {}
+        pack = report.get("decoy_pack") or {}
         print(f"结果：会话 {report['session']} 处于封锁状态 —— {lock_info.get('reason', '')}")
         print(
-            f"      蜜罐凭据 {len(report['honeytokens'])} 只　事件报告 {len(report['incidents'])} 份　"
+            f"      假情报包 1 个（{pack.get('files', 0)} 文件 / {pack.get('bytes', 0)} 字节，"
+            f"{pack.get('canaries', 0)} 条 canary）　"
+            f"蜜罐凭据 {len(report['honeytokens'])} 条　事件报告 {len(report['incidents'])} 份　"
             f"隔离 {len(report.get('quarantined', []))} 项　"
             f"终止钩子调用 {report['hooks_called'].get('terminate', 0)} 次　"
             f"告警 {report['hooks_called'].get('alert', 0)} 次"
@@ -615,6 +619,80 @@ def _cmd_quarantine_restore(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 假情报包（decoy）
+# --------------------------------------------------------------------------- #
+
+def _decoy_factory(args: argparse.Namespace) -> DecoyFactory:
+    return DecoyFactory(
+        HoneytokenRegistry(_state_dir(args)), session=getattr(args, "session", "default")
+    )
+
+
+def _cmd_decoy_generate(args: argparse.Namespace) -> int:
+    factory = _decoy_factory(args)
+    try:
+        pack = factory.build_pack(args.dir, profile=args.profile)
+    except FileExistsError as exc:
+        print(f"无法生成：{exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"已生成诱饵包 {pack.id}（{pack.profile}）：{pack.root}")
+    for path in pack.files:
+        print(f"  - {path.relative_to(pack.root)}　{path.stat().st_size} B")
+    print(f"共 {len(pack.files)} 个文件 / {pack.bytes} 字节；登记 canary {len(pack.canaries)} 条")
+    print("用法：把整个目录放到被管对象会浏览的位置——onboarding / README 里的面包屑")
+    print("会引导它'不经意'发现诱饵；任何读取 / 携带 / 外发都会被捕获、溯源并触发反制。")
+    print(f"清理：antiai decoy remove {pack.id}")
+    return EXIT_OK
+
+
+def _cmd_decoy_list(args: argparse.Namespace) -> int:
+    packs = _decoy_factory(args).list_packs()
+    if args.json:
+        print(json.dumps(packs, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    if not packs:
+        print("（尚未生成诱饵包。生成：antiai decoy generate --dir <目录>）")
+        return EXIT_OK
+    for data in packs:
+        print(
+            f"[{data['id']}] {data.get('profile')}　根目录={data.get('root')}　"
+            f"文件 {len(data.get('files', []))}　canary {len(data.get('canaries', []))}　"
+            f"{data.get('bytes', 0)} B"
+        )
+    return EXIT_OK
+
+
+def _cmd_decoy_remove(args: argparse.Namespace) -> int:
+    factory = _decoy_factory(args)
+    if args.all:
+        pack_ids = [str(data["id"]) for data in factory.list_packs()]
+    else:
+        pack_ids = [args.id]
+    if not pack_ids:
+        print("（没有可清理的诱饵包）")
+        return EXIT_OK
+    removed = 0
+    for pack_id in pack_ids:
+        try:
+            count = factory.remove_pack(pack_id)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"跳过 {pack_id}：{exc}", file=sys.stderr)
+            continue
+        removed += count
+        print(f"已清理诱饵包 {pack_id}（移除 {count} 个文件）")
+    print(f"共移除 {removed} 个文件。")
+    return EXIT_OK
+
+
+def _cmd_decoy_snippet(args: argparse.Namespace) -> int:
+    token, text = _decoy_factory(args).prompt_snippet()
+    print(text)
+    print(f"（canary {token.id} 已登记。把这段文本放进被管对象的系统提示 / 上下文里，")
+    print("  它一旦出现在任何对外输出中，即可精确溯源到这个会话并触发反制。）")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
 # 解析器
 # --------------------------------------------------------------------------- #
 
@@ -764,6 +842,29 @@ def build_parser() -> argparse.ArgumentParser:
     q_restore.add_argument("--to", help="恢复到指定路径（默认恢复原路径）")
     q_restore.add_argument("--state-dir", help="状态目录")
     q_restore.set_defaults(func=_cmd_quarantine_restore)
+
+    p_decoy = sub.add_parser("decoy", help="假情报包：生成高仿真诱饵文档 / 提示词片段 / 清理")
+    decoy_sub = p_decoy.add_subparsers(dest="decoy_command", required=True)
+    d_gen = decoy_sub.add_parser("generate", help="生成诱饵文档包（小体积、高仿真、面包屑引导）")
+    d_gen.add_argument("--dir", required=True, help="诱饵包根目录（放到被管对象会浏览的位置）")
+    d_gen.add_argument("--profile", default="standard", choices=PROFILES, help="包规模")
+    d_gen.add_argument("--seed", type=int, help="随机种子（可复现）")
+    d_gen.add_argument("--session", default="default", help="归属会话")
+    d_gen.add_argument("--state-dir", help="状态目录")
+    d_gen.set_defaults(func=_cmd_decoy_generate)
+    d_list = decoy_sub.add_parser("list", help="列出已生成的诱饵包")
+    d_list.add_argument("--state-dir", help="状态目录")
+    d_list.add_argument("--json", action="store_true", help="输出 JSON")
+    d_list.set_defaults(func=_cmd_decoy_list)
+    d_remove = decoy_sub.add_parser("remove", help="按清单清理诱饵包文件")
+    d_remove.add_argument("id", nargs="?", help="诱饵包 id（见 decoy list）")
+    d_remove.add_argument("--all", action="store_true", help="清理全部诱饵包")
+    d_remove.add_argument("--state-dir", help="状态目录")
+    d_remove.set_defaults(func=_cmd_decoy_remove)
+    d_snippet = decoy_sub.add_parser("snippet", help="生成一段可注入上下文的'内部备忘'诱饵")
+    d_snippet.add_argument("--session", default="default", help="归属会话")
+    d_snippet.add_argument("--state-dir", help="状态目录")
+    d_snippet.set_defaults(func=_cmd_decoy_snippet)
 
     return parser
 

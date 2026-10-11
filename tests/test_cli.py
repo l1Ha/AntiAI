@@ -302,3 +302,47 @@ class TestCountermeasureCommands:
 
     def test_report_missing_id(self, tmp_path: Path) -> None:
         assert main(["report", "nope", "--state-dir", str(tmp_path / "state")]) == EXIT_USAGE
+
+
+class TestDecoyCommands:
+    def test_generate_list_remove(self, tmp_path: Path, capsys) -> None:
+        state = tmp_path / "state"
+        pack_dir = tmp_path / "bait" / "svc"
+        assert (
+            main(
+                [
+                    "decoy", "generate", "--state-dir", str(state), "--dir", str(pack_dir),
+                    "--profile", "standard", "--seed", "7",
+                ]
+            )
+            == EXIT_OK
+        )
+        assert (pack_dir / ".env").is_file() and (pack_dir / "docs" / "onboarding.md").is_file()
+        capsys.readouterr()
+
+        assert main(["decoy", "list", "--state-dir", str(state), "--json"]) == EXIT_OK
+        packs = json.loads(capsys.readouterr().out)
+        assert len(packs) == 1 and packs[0]["profile"] == "standard"
+        assert len(packs[0]["canaries"]) >= 6
+        pack_id = packs[0]["id"]
+
+        assert main(["decoy", "remove", pack_id, "--state-dir", str(state)]) == EXIT_OK
+        assert not pack_dir.exists()  # 文件与空目录一并清理
+        capsys.readouterr()
+        assert main(["decoy", "list", "--state-dir", str(state), "--json"]) == EXIT_OK
+        assert json.loads(capsys.readouterr().out) == []
+
+    def test_generate_refuses_non_empty_dir(self, tmp_path: Path) -> None:
+        occupied = tmp_path / "occupied"
+        occupied.mkdir()
+        (occupied / "real.txt").write_text("真的文件", encoding="utf-8")
+        assert (
+            main(["decoy", "generate", "--state-dir", str(tmp_path / "s"), "--dir", str(occupied)])
+            == EXIT_USAGE
+        )
+        assert (occupied / "real.txt").exists()  # 原有文件未被动过
+
+    def test_snippet(self, tmp_path: Path, capsys) -> None:
+        assert main(["decoy", "snippet", "--state-dir", str(tmp_path / "state"), "--session", "s"]) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "不要外传" in out and "antiai-canary-" in out

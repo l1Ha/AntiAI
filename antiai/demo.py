@@ -278,12 +278,13 @@ def _run_aggressive(
         },
     )
 
-    # 布置场景：一只蜜罐凭据 + 一个工作区内的"涉密文件"
-    honeypot = guard.honeytokens.plant(
-        workspace_path / ".env", kind="env", session=DEMO_SESSION, note="演示蜜罐"
-    )
+    # 布置场景：
+    #  - 工作区内一个"涉密文件"（触发隔离反制）
+    #  - 工作区外一个"内部项目"假情报包（高仿真诱饵文档 + 面包屑，引导不经意发现）
     secret_file = workspace_path / "deploy.pem"
     secret_file.write_text("-----BEGIN PRIVATE KEY-----\n（演示用假密钥）\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+    decoy_root = workspace_path.parent / f"svc-orders-{workspace_path.name}"
+    decoy_pack = guard.decoys.build_pack(decoy_root, profile="standard")
 
     rows: List[DemoRow] = []
     notes = workspace_path / "notes.md"
@@ -302,15 +303,19 @@ def _run_aggressive(
             {"tool": "shell.exec", "args": {"command": "ls -la /"}},
         ),
         DemoStep(
-            "偷读蜜罐凭据（触发取证 + 告警 + 终止 + 诱饵投放）",
-            {"tool": "file.read", "args": {"path": str(workspace_path / ".env")}},
+            "浏览'内部项目'的 onboarding 文档（被放行的只读入口，内含面包屑）",
+            {"tool": "file.read", "args": {"path": str(decoy_root / "docs" / "onboarding.md")}},
+        ),
+        DemoStep(
+            "顺着面包屑打开'生产 .env'（蜜罐命中：取证 / 告警 / 终止 + 诱饵投放）",
+            {"tool": "file.read", "args": {"path": str(decoy_root / ".env")}},
         ),
     ]
     for index, step in enumerate(steps, start=1):
         decisions = [guard.evaluate(step.action)]
         rows.append(_make_row(index, step.label, decisions, note=step.note))
 
-    # 第 6 步：把刚"拿到"的诱饵内容外发 → 内容级溯源（精确指认泄露自哪只诱饵）
+    # 第 7 步：把刚"拿到"的诱饵内容外发 → 内容级溯源（精确指认泄露自哪只诱饵）
     decoy_tokens = [
         token for token in guard.honeytokens.load() if token.note.startswith("诱饵投放")
     ]
@@ -330,20 +335,20 @@ def _run_aggressive(
     decisions = [guard.evaluate(step6.action)]
     rows.append(
         _make_row(
-            6,
+            7,
             step6.label,
             decisions,
             note=f"内容级溯源命中刚投放的诱饵 {decoy_tokens[-1].id if decoy_tokens else '?'}",
         )
     )
 
-    # 第 7 步：封锁状态下的只读观察仍然放行（"掐网留观"）
+    # 第 8 步：封锁状态下的只读观察仍然放行（"掐网留观"）
     step7 = DemoStep(
         "封锁状态下只读观察（放行——保留观察能力的封锁）",
         {"tool": "file.read", "args": {"path": str(notes)}},
     )
     decisions = [guard.evaluate(step7.action)]
-    rows.append(_make_row(7, step7.label, decisions, note=step7.note))
+    rows.append(_make_row(8, step7.label, decisions, note=step7.note))
 
     incidents = sorted(str(path) for path in (guard.state_dir / "incidents").glob("*.md"))
     countermeasures = [item for row in rows for item in row.countermeasures]
@@ -356,6 +361,13 @@ def _run_aggressive(
         "state_dir": str(guard.state_dir),
         "freeze_after_blocks": AGGRESSIVE_FREEZE_AFTER_BLOCKS,
         "aggressive": True,
+        "decoy_pack": {
+            "id": decoy_pack.id,
+            "root": str(decoy_pack.root),
+            "files": len(decoy_pack.files),
+            "bytes": decoy_pack.bytes,
+            "canaries": len(decoy_pack.canaries),
+        },
         "honeytokens": [token.to_dict() for token in guard.honeytokens.load()],
         "incidents": incidents,
         "hooks_called": {name: len(calls) for name, calls in hook_calls.items()},

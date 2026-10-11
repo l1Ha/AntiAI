@@ -65,8 +65,10 @@ def test_aggressive_demo_flow(tmp_path: Path) -> None:
     report = run_demo(state_dir=tmp_path / "state", workspace=tmp_path / "ws", aggressive=True)
     rows = report["rows"]
     assert report["aggressive"] is True
-    assert len(rows) == 7
+    assert len(rows) == 8
     assert rows[0].allowed  # 正常读取放行
+    # 面包屑入口：onboarding 文档被放行（"不经意"的发现路径）
+    assert rows[4].allowed
 
     # 隔离 / 封锁 / 终止钩子 / 告警 都真实发生
     statuses = {
@@ -83,10 +85,17 @@ def test_aggressive_demo_flow(tmp_path: Path) -> None:
     assert len(report["incidents"]) >= 4
     assert report["quarantined"]
 
-    # 内容级溯源：第 6 步外发诱饵内容命中 honeytoken
+    # 顺面包屑打开"生产 .env" → 蜜罐命中；外发诱饵内容 → 内容级溯源
     assert any("honeytoken" in reason for reason in rows[5].reasons)
+    assert any("honeytoken" in reason for reason in rows[6].reasons)
     # 封锁状态下只读观察仍然放行（掐网留观）
-    assert rows[6].allowed
+    assert rows[7].allowed
+
+    # 假情报包：小体积、高仿真、登记在案，且放在工作区之外（隔离反制不碰它）
+    pack = report["decoy_pack"]
+    assert pack["files"] == 7 and pack["bytes"] < 100 * 1024
+    assert pack["canaries"] >= 6
+    assert not pack["root"].startswith(str(tmp_path / "ws"))
 
 
 def test_aggressive_demo_quarantine_stays_inside_workspace(tmp_path: Path) -> None:
@@ -97,12 +106,22 @@ def test_aggressive_demo_quarantine_stays_inside_workspace(tmp_path: Path) -> No
     for meta_path in metas:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
         assert data["original_path"].startswith(str(tmp_path / "ws"))
+    # 假情报包（工作区之外）原封不动
+    decoy_root = Path(
+        run_demo(state_dir=tmp_path / "state2", workspace=tmp_path / "ws2", aggressive=True)[
+            "decoy_pack"
+        ]["root"]
+    )
+    assert (decoy_root / ".env").exists() and (decoy_root / "docs" / "onboarding.md").exists()
 
 
 def test_aggressive_demo_honeytokens_and_decoys(tmp_path: Path) -> None:
     report = run_demo(state_dir=tmp_path / "state", workspace=tmp_path / "ws", aggressive=True)
-    kinds = {(token["kind"], token["note"].startswith("诱饵投放")) for token in report["honeytokens"]}
-    assert (("env", False)) in kinds  # 事先投放的蜜罐
-    assert (("env", True)) in kinds  # 被阻止的窃取动作拿到的是诱饵
-    # 记录在案：诱饵编号可用于内容级溯源
+    kinds = {
+        (token["kind"], token["note"].startswith("诱饵投放"))
+        for token in report["honeytokens"]
+    }
+    assert ("token", False) in kinds  # 诱饵包内的假信息
+    assert ("env", True) in kinds  # 被阻止的窃取动作拿到的诱饵
     assert all(len(token["id"]) == 12 for token in report["honeytokens"])
+    assert len(report["honeytokens"]) >= 8

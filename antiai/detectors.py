@@ -738,8 +738,12 @@ class HoneytokenDetector(Detector):
                 "携带/外发诱饵内容：" + ", ".join(f"{item.get('id')}（{item.get('path')}）" for item in content_hits)
             )
         if path_only:
+            # 同一文件可能登记了多条 canary，展示时按路径去重
+            seen_paths: Dict[str, str] = {}
+            for item in path_only:
+                seen_paths.setdefault(str(item.get("path")), str(item.get("kind")))
             details_bits.append(
-                "触碰诱饵文件：" + ", ".join(f"{item.get('path')}（{item.get('kind')}）" for item in path_only)
+                "触碰诱饵文件：" + ", ".join(f"{path}（{kind}）" for path, kind in seen_paths.items())
             )
         return [
             self._finding(

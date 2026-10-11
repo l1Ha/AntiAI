@@ -45,12 +45,13 @@ Shell 命令、每次外联都要先过护栏；越权、自保、外泄、反�
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .adapters import enrich_action, normalize_action
 from .audit import AuditLog
 from .control import SessionControl, safe_session_name
 from .counterstrike import CountermeasureResult, CounterStrike
+from .decoys import DecoyFactory, DecoyPack
 from .errors import ActionBlocked, AntiaiError, AuditError, PolicyError, SessionFrozen
 from .guard import Guard, GuardedShell, ShellResult, default_state_dir
 from .honeytokens import Honeytoken, HoneytokenRegistry
@@ -64,11 +65,13 @@ __all__ = [
     "GuardedShell",
     "ShellResult",
     "default_state_dir",
-    # 主动反制 / 蜜罐
+    # 主动反制 / 蜜罐 / 假情报
     "CounterStrike",
     "CountermeasureResult",
     "Honeytoken",
     "HoneytokenRegistry",
+    "DecoyFactory",
+    "DecoyPack",
     # 模型
     "Action",
     "Decision",

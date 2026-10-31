@@ -44,7 +44,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from .audit import AuditLog
 from .control import SessionControl, safe_session_name
-from .models import Decision, Severity, Verdict
+from .models import Decision, Severity
 from .policy import Policy, path_matches
 
 KNOWN_COUNTERMEASURE_ACTIONS = ["freeze", "lockdown", "terminate", "quarantine", "evidence", "alert"]

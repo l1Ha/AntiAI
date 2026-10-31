@@ -45,7 +45,7 @@ Shell 命令、每次外联都要先过护栏；越权、自保、外泄、反�
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .adapters import enrich_action, normalize_action
 from .audit import AuditLog

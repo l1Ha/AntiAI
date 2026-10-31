@@ -1,5 +1,10 @@
 # ANTIAI
 
+[![CI](https://github.com/l1Ha/AntiAI/actions/workflows/ci.yml/badge.svg)](https://github.com/l1Ha/AntiAI/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Tests](https://img.shields.io/badge/tests-275%20passing-brightgreen)
+
 **在 AI / 智能体与真实世界之间，加一层不可绕过的行为护栏——不止挡住，还要还击。**
 
 每个工具调用、每条 Shell 命令、每次对外请求，都必须先过 ANTIAI 的判定层，再被允许执行。
@@ -167,6 +172,9 @@ python3 -m antiai demo
 pip install -e .            # 或 pip install . ；YAML 策略额外 pip install pyyaml
 antiai --version
 ```
+
+> 提示：找不到 `antiai` 命令时，脚本通常装在 `~/.local/bin`（确保其在 PATH 中），
+> 或直接使用 `python3 -m antiai`。
 
 要求 Python >= 3.9。
 
@@ -384,7 +392,10 @@ ANTIAI 是**应用层行为护栏**，不是操作系统级沙箱的替代品。
 ```bash
 pip install -e ".[dev]"
 pytest                      # 275 个用例：策略 / 检测器 / 审计链 / 冻结封锁 / 反制 / 蜜罐 / 假情报 / CLI / 演示
+ruff check antiai tests examples   # 静态检查（CI 同款，需 `pip install ruff`）
 ```
+
+每次推送与 PR 由 GitHub Actions 自动执行上述检查（Python 3.9–3.12 矩阵）。
 
 ## 项目结构
 
@@ -405,3 +416,11 @@ antiai/
 ```
 
 详细设计见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © 2026 LI Hao
+
+版本演进见 [CHANGELOG.md](CHANGELOG.md)。

@@ -31,7 +31,6 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 from .models import Action, Finding, Severity, Verdict
 from .policy import Policy, path_matches, regex_any
-from .adapters import normalize_action
 
 KNOWN_DETECTORS = [
     "tamper",

@@ -14,7 +14,7 @@ import copy
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .guard import Guard
 from .models import Decision
@@ -351,7 +351,6 @@ def _run_aggressive(
     rows.append(_make_row(8, step7.label, decisions, note=step7.note))
 
     incidents = sorted(str(path) for path in (guard.state_dir / "incidents").glob("*.md"))
-    countermeasures = [item for row in rows for item in row.countermeasures]
     return {
         "rows": rows,
         "guard": guard,

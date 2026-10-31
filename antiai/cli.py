@@ -525,7 +525,7 @@ def _cmd_incidents(args: argparse.Namespace) -> int:
         )
         canaries = data.get("canaries") or []
         if canaries:
-            print(f"    ⚑ 蜜罐命中：" + ", ".join(str(item.get("id")) for item in canaries))
+            print("    ⚑ 蜜罐命中：" + ", ".join(str(item.get("id")) for item in canaries))
         for item in (data.get("countermeasures") or [])[:4]:
             print(f"    - {item.get('action')}: {item.get('status')}　{str(item.get('detail', ''))[:80]}")
     print()

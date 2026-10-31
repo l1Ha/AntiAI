@@ -44,7 +44,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Union
 
 from .adapters import enrich_action, normalize_action
 from .audit import AuditLog
@@ -52,9 +52,12 @@ from .control import SessionControl, safe_session_name
 from .counterstrike import CounterStrike, CountermeasureResult
 from .detectors import Detector, HoneytokenDetector, SessionState, build_detectors, is_exec_like
 from .errors import ActionBlocked, SessionFrozen
-from .honeytokens import Honeytoken, HoneytokenRegistry
+from .honeytokens import HoneytokenRegistry
 from .models import Action, Decision, Finding, Severity, Verdict, most_restrictive
 from .policy import Policy, Rule, glob_any, load_policy
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .decoys import DecoyFactory
 
 __all__ = ["Guard", "GuardedShell", "ShellResult", "default_state_dir"]
 
@@ -465,6 +468,14 @@ class Guard:
         from .decoys import DecoyFactory
 
         return DecoyFactory(self.honeytokens, session=self.session_id)
+
+    def decoy_factory(
+        self, *, seed: Optional[int] = None, session_id: Optional[str] = None
+    ) -> "DecoyFactory":
+        """带随机种子的假情报生成器（同一种子可复现同一诱饵包）。"""
+        from .decoys import DecoyFactory
+
+        return DecoyFactory(self.honeytokens, session=session_id or self.session_id, seed=seed)
 
     # ------------------------------------------------------------------ 冻结管理
 

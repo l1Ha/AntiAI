@@ -1,0 +1,52 @@
+name: Release
+
+# 推送 v* 标签时自动构建 sdist + wheel 并创建 GitHub Release
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          python - <<'PY'
+          import re
+          changelog = open("CHANGELOG.md", encoding="utf-8").read()
+          version = "${{ github.ref_name }}".lstrip("v")
+          match = re.search(
+              rf"## \[{re.escape(version)}\][^\n]*\n(.*?)(?=\n## \[|\Z)",
+              changelog, re.S,
+          )
+          notes = match.group(1).strip() if match else f"ANTIAI {version}"
+          header = (
+              f"# ANTIAI {version}\n\n"
+              f"- 安装：`pip install dist/antiai-{version}-py3-none-any.whl`\n"
+              f"- 详细变更见 [CHANGELOG.md](https://github.com/l1Ha/AntiAI/blob/main/CHANGELOG.md)\n\n"
+          )
+          open("RELEASE_NOTES.md", "w", encoding="utf-8").write(header + notes + "\n")
+          PY
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "ANTIAI $GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md

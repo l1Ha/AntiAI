@@ -43,6 +43,11 @@ include = ["antiai*"]
 [tool.setuptools.package-data]
 antiai = ["py.typed"]
 
+[tool.ruff.lint]
+# 与本地验证一致的默认规则集；EXE 等依赖文件系统权限位的规则在此不适用
+# （项目目录位于 NTFS/exFAT 卷上时所有文件都会被标记为可执行）
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

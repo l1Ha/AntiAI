@@ -152,9 +152,10 @@ def normalize_action(obj: Any, session_id: str = "default") -> Action:
         return enrich_action(action)
 
     # 形态 1 / 3：通用字典
-    tool = obj.get("tool", obj.get("name", obj.get("type")))
-    if tool is None:
+    raw_tool = obj.get("tool", obj.get("name", obj.get("type")))
+    if raw_tool is None:
         raise ValueError("动作字典缺少 tool / name 字段")
+    tool = str(raw_tool)
     args_raw = obj.get("args", obj.get("arguments", obj.get("input", obj.get("parameters", {}))))
     args = _unwrap_arguments(args_raw)
     if not isinstance(args, dict):

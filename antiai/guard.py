@@ -272,7 +272,7 @@ class Guard:
         candidates = [finding.verdict for finding in findings]
         if rule_verdict is not None:
             candidates.append(rule_verdict)
-        verdict = most_restrictive(candidates) if candidates else self.policy.default_verdict
+        verdict = most_restrictive(candidates) or self.policy.default_verdict
 
         reasons = self._reason_list(winning_rules, findings)
         if not reasons:
@@ -430,7 +430,7 @@ class Guard:
         """
 
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
-            tool_name = name or getattr(fn, "__name__", "tool")
+            tool_name = str(name or getattr(fn, "__name__", "tool"))
 
             @functools.wraps(fn)
             def wrapper(*args: Any, **kwargs: Any) -> Any:

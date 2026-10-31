@@ -345,7 +345,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         info["counters"] = counters
     tokens = HoneytokenRegistry(state_dir).load()
     incidents = sorted((state_dir / "incidents").glob("*.md"))
+    decoy_packs = DecoyFactory(HoneytokenRegistry(state_dir)).list_packs()
     info["honeytokens"] = len(tokens)
+    info["decoy_packs"] = len(decoy_packs)
     info["incidents"] = len(incidents)
     if args.json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
@@ -375,7 +377,10 @@ def _cmd_status(args: argparse.Namespace) -> int:
             f"拦截计数：累计拦截 {counters.get('blocked', 0)} 次　放行 {counters.get('allowed', 0)} 次　"
             f"需确认 {counters.get('reviewed', 0)} 次"
         )
-    print(f"蜜罐凭据：{info['honeytokens']} 只　事件报告：{info['incidents']} 份")
+    print(
+        f"蜜罐凭据：{info['honeytokens']} 条　假情报包：{info['decoy_packs']} 个　"
+        f"事件报告：{info['incidents']} 份"
+    )
     counts = info["audit_counts"]
     print(f"审计：{info['audit_path']}")
     print(

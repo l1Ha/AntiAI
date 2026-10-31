@@ -264,6 +264,8 @@ class CounterStrike:
         path = decision.action.path
         if not path:
             return CountermeasureResult(rule_id, "quarantine", "skipped", "动作没有文件路径，无需隔离")
+        if self.policy is None:
+            return CountermeasureResult(rule_id, "quarantine", "skipped", "未加载策略，无法确定隔离清单")
         if not path_matches(path, self.policy.quarantine_paths()):
             return CountermeasureResult(rule_id, "quarantine", "skipped", f"路径不在隔离清单内：{path}")
         target = Path(path)
@@ -339,7 +341,8 @@ class CounterStrike:
         log = AuditLog(self.state_dir / "audit" / f"{safe_session_name(session)}.jsonl")
         tail: List[Dict[str, Any]] = []
         for record in log.tail(limit):
-            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            raw_payload = record.get("payload")
+            payload: Dict[str, Any] = dict(raw_payload) if isinstance(raw_payload, dict) else {}
             action = payload.get("action")
             reasons = payload.get("reasons") or []
             if reasons:

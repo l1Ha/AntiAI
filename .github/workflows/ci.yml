@@ -27,11 +27,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install ".[dev,yaml]"
-          pip install ruff
+          pip install ruff mypy
 
       - name: Lint with ruff
         run: |
           ruff check antiai tests examples
+
+      - name: Type check with mypy
+        run: |
+          mypy antiai/
 
       - name: Run test suite
         run: |

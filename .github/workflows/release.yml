@@ -47,6 +47,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 幂等：Release 已存在时改为覆盖上传附件
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "ANTIAI $GITHUB_REF_NAME" \
-            --notes-file RELEASE_NOTES.md
+            --notes-file RELEASE_NOTES.md \
+          || gh release upload "$GITHUB_REF_NAME" dist/* --clobber

@@ -8,6 +8,31 @@ on:
     branches: [ main ]
 
 jobs:
+  lint:
+    # 静态检查与类型检查独立成 job：mypy 新版不支持最老支持版本的 Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: |
+          python -m pip install --upgrade pip
+          # 锁定与本地验证一致的版本：新版 ruff/mypy 的规则集变化不应让 CI 漂移
+          pip install "ruff==0.9.1" "mypy==2.4.1"
+
+      - name: Lint with ruff
+        run: |
+          ruff check antiai tests examples
+
+      - name: Type check with mypy
+        run: |
+          mypy antiai/
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -23,20 +48,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Install package
         run: |
           python -m pip install --upgrade pip
           pip install ".[dev,yaml]"
-          # 锁定与本地验证一致的版本：新版 ruff/mypy 的规则集变化不应让 CI 漂移
-          pip install "ruff==0.9.1" "mypy==2.4.1"
-
-      - name: Lint with ruff
-        run: |
-          ruff check antiai tests examples
-
-      - name: Type check with mypy
-        run: |
-          mypy antiai/
 
       - name: Run test suite
         run: |

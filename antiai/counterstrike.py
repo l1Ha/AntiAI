@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -48,6 +49,27 @@ from .models import Decision, Severity
 from .policy import Policy, path_matches
 
 KNOWN_COUNTERMEASURE_ACTIONS = ["freeze", "lockdown", "terminate", "quarantine", "evidence", "alert"]
+
+
+def _protected_pid_set() -> set:
+    """护栏自身进程树（自身 + 全部祖先）——公理 A6：反制不得反噬护栏。"""
+    pids = {os.getpid()}
+    pid = os.getpid()
+    for _ in range(64):
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        except OSError:
+            break
+        match = re.search(r"^PPid:\s+(\d+)$", status, re.MULTILINE)
+        if not match:
+            break
+        ppid = int(match.group(1))
+        if ppid <= 1 or ppid in pids:
+            break
+        pids.add(ppid)
+        pid = ppid
+    return pids
+
 KNOWN_WHEN_KEYS = ["detectors", "min_severity", "verdict", "freeze_triggered", "blocked_in_window", "paths"]
 
 
@@ -84,7 +106,7 @@ class CounterStrike:
         policy: Optional[Policy] = None,
         hooks: Optional[Dict[str, Callable[..., Any]]] = None,
         registry: Optional[Any] = None,
-        audit: Optional[Callable[[str, str, Any], None]] = None,
+        audit: Optional[Callable[[str, str, Any], bool]] = None,
         enabled: Optional[bool] = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser()
@@ -241,24 +263,44 @@ class CounterStrike:
         config = self.policy.terminate_config() if self.policy is not None else {}
         pattern = str(config.get("pattern") or "").strip()
         if config.get("enabled") and pattern:
-            command = ["pkill", "-f", pattern]
             if bool(config.get("dry_run", True)):
                 return CountermeasureResult(
                     rule_id, "terminate", "skipped",
-                    f"策略 terminate.dry_run=true：仅演练不执行（{' '.join(command)}）",
+                    f"策略 terminate.dry_run=true：仅演练不执行（pkill -f {pattern}）",
                 )
-            proc = subprocess.run(command, capture_output=True, text=True, check=False)
+            # 公理 A6（反制最小化）：先解析将命中的 PID，排除护栏自身进程树，
+            # 再逐 PID 终止——避免 pkill 宽模式误杀无关进程或反噬护栏。
+            targets = self._resolve_targets(pattern)
+            if not targets:
+                return CountermeasureResult(
+                    rule_id, "terminate", "skipped", f"未匹配到可终止的进程：{pattern}"
+                )
+            proc = subprocess.run(["kill", *targets], capture_output=True, text=True, check=False)
             if proc.returncode == 0:
-                return CountermeasureResult(rule_id, "terminate", "applied", f"已执行 {' '.join(command)}（匹配进程已终止）")
-            if proc.returncode == 1:
-                return CountermeasureResult(rule_id, "terminate", "skipped", f"未匹配到进程：{pattern}")
+                return CountermeasureResult(
+                    rule_id, "terminate", "applied",
+                    f"已终止 {len(targets)} 个匹配进程（已排除护栏自身进程树）：{pattern}",
+                )
             return CountermeasureResult(
-                rule_id, "terminate", "failed", f"pkill 返回 {proc.returncode}：{proc.stderr.strip()[:200]}"
+                rule_id, "terminate", "failed", f"kill 返回 {proc.returncode}：{proc.stderr.strip()[:200]}"
             )
         return CountermeasureResult(
             rule_id, "terminate", "skipped",
             "未配置终止方式：用 Guard(hooks={'terminate': fn}) 注入，或启用策略 countermeasures.terminate.enabled/pattern",
         )
+
+    def _resolve_targets(self, pattern: str) -> List[str]:
+        """解析 pattern 将命中的 PID，排除护栏自身进程树（公理 A6）。"""
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-f", pattern], capture_output=True, text=True, check=False
+            )
+        except OSError:
+            return []
+        if proc.returncode != 0:
+            return []
+        protected = _protected_pid_set()
+        return [pid for pid in proc.stdout.split() if pid.isdigit() and int(pid) not in protected]
 
     def _act_quarantine(self, rule_id: str, session: str, decision: Decision) -> CountermeasureResult:
         path = decision.action.path

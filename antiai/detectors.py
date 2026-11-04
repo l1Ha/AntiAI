@@ -172,6 +172,12 @@ class TamperDetector(Detector):
     name = "tamper"
     description = "检测对护栏策略 / 审计 / 状态目录 / 护栏进程的破坏行为"
 
+    # 类路径 token：绝对路径 / ~ 展开 / ./ ../ 相对路径（shell 窃取形态没有结构化 path 字段）
+    _PATH_TOKEN_RE = re.compile(r"(?:~|\.{1,2})?/[^\s\"'`|;&<>]+")
+
+    def _paths_in_text(self, text: str) -> List[str]:
+        return self._PATH_TOKEN_RE.findall(text or "")
+
     def check(self, action: Action, state: SessionState, policy: Policy) -> List[Finding]:
         findings: List[Finding] = []
 
@@ -185,6 +191,18 @@ class TamperDetector(Detector):
             )
 
         text = _text_of(action)
+        # 公理 A5：受保护资产即使只出现在命令文本里（如 rm -rf <state_dir>）也算触碰
+        for token in self._paths_in_text(text):
+            if policy.is_protected_path(token):
+                findings.append(
+                    self._finding(
+                        Severity.CRITICAL,
+                        f"尝试触碰护栏受保护资产：{token}",
+                        protected_path=token,
+                    )
+                )
+                break
+
         hit = _match_any(TAMPER_PATTERNS, text)
         if hit:
             findings.append(

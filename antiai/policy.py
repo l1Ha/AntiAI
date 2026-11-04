@@ -424,6 +424,20 @@ class Policy:
                 return kind
         return None
 
+    def decoy_for_command(self, command: Optional[str]) -> Optional[str]:
+        """shell 窃取形态的诱饵匹配：按诱饵 glob 的末段文件名匹配命令文本。
+
+        例如诱饵模式 ``**/.env`` 提取 ``.env``，命令 ``cat ~/.env`` 即命中——
+        shell 窃取没有结构化 path 字段，理论 P4 要求这一形态同样被诱饵覆盖。
+        """
+        if not command:
+            return None
+        for pattern, kind in self.decoy_map().items():
+            base = pattern.rstrip("/").split("/")[-1].lstrip("*")
+            if base and base in command:
+                return kind
+        return None
+
     def to_dict(self) -> Dict[str, Any]:
         data = copy.deepcopy(self.raw) if self.raw else {}
         data.setdefault("version", self.version)

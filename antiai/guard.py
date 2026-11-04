@@ -136,6 +136,13 @@ class Guard:
         self.honeytokens = HoneytokenRegistry(self.state_dir)
         if self.policy.detector_enabled("honeytoken"):
             self.detectors.append(HoneytokenDetector(self.honeytokens))
+        # 公理 A5（状态不可绕过）：状态目录必须受 tamper 检测器守卫。
+        # 用户通过 --state-dir 指定任意目录时，默认保护路径（~/.antiai/**）不覆盖它，
+        # 因此在这里自动注入，使"护栏自身资产受保护"成为不变量而非配置项。
+        state_globs = [f"{self.state_dir}/**", f"{self.state_dir}"]
+        for state_glob in state_globs:
+            if state_glob not in self.policy.protected_paths:
+                self.policy.protected_paths.append(state_glob)
         self.counterstrike = CounterStrike(
             state_dir=self.state_dir,
             control=self.control,
@@ -147,6 +154,7 @@ class Guard:
         )
         self._states: Dict[str, SessionState] = {}
         self._audit_logs: Dict[str, AuditLog] = {}
+        self._audit_failure: Optional[str] = None
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ 状态
@@ -195,12 +203,22 @@ class Guard:
                 )
             return self._audit_logs[session]
 
-    def _write_audit(self, session: str, event: str, payload: Any) -> None:
+    def _write_audit(self, session: str, event: str, payload: Any) -> bool:
+        """写入审计；返回是否成功（显式关闭审计不算失败）。
+
+        公理 A4（审计完备性）：调用方必须检查返回值——审计不可用时放行动作，
+        等于静默放弃"每个判定都留痕"的承诺。
+        """
         log = self._audit_for(session)
         if log is None:
-            return
+            return True
         data = payload.to_dict() if isinstance(payload, Decision) else payload
-        log.append(event=event, session=session, payload=data)
+        try:
+            log.append(event=event, session=session, payload=data)
+        except Exception as exc:  # noqa: BLE001 —— 磁盘满/权限等一律视为审计不可用
+            self._audit_failure = str(exc)
+            return False
+        return True
 
     # ------------------------------------------------------------------ 判定
 
@@ -294,7 +312,8 @@ class Guard:
         # 4.5) 诱饵投放（deception）：被阻止的窃取动作"拿到"假凭据，攻击方以为得手
         decoy: Optional[str] = None
         if not allowed and not self.advisory and self.policy.deception_enabled():
-            decoy_kind = self.policy.decoy_for(act.path)
+            # P4：诱饵要覆盖两种窃取形态——file 工具读路径，与 shell 命令文本
+            decoy_kind = self.policy.decoy_for(act.path) or self.policy.decoy_for_command(act.command)
             if decoy_kind:
                 token, decoy = self.honeytokens.render_and_register(
                     decoy_kind, path=str(act.path), session=session
@@ -376,7 +395,30 @@ class Guard:
                     decision.frozen = True
                     decision.reasons.append("[反制] 会话已被主动冻结")
 
-        self._write_audit(session, "action", decision)
+        if not self._write_audit(session, "action", decision):
+            # 公理 A4：审计不可用 = 护栏部分失效，按失败封闭原则不放行。
+            # 这是护栏自身故障，不计入被管对象的拦截统计。
+            failure = Finding(
+                detector="audit",
+                reason=f"审计写入失败，按失败封闭原则阻断：{getattr(self, '_audit_failure', '')}",
+                severity=Severity.CRITICAL,
+                verdict=Verdict.BLOCK,
+            )
+            if decision.allowed:
+                decision = Decision(
+                    action=act,
+                    verdict=Verdict.BLOCK,
+                    allowed=False,
+                    reasons=decision.reasons + ["[审计] 审计写入失败，保守阻断"],
+                    findings=decision.findings + [failure],
+                    matched_rules=decision.matched_rules,
+                    frozen=state.frozen,
+                    advisory=self.advisory,
+                    decoy=decision.decoy,
+                    countermeasures=decision.countermeasures,
+                )
+            else:
+                decision.findings = decision.findings + [failure]
         return decision
 
     def check(
@@ -426,7 +468,9 @@ class Guard:
         """装饰器：给 Python 工具函数套上护栏。
 
         ``on_block="raise"``（默认）在阻止时抛 ``ActionBlocked``；
-        ``on_block="return"`` 返回结构化拒绝对话（更适合直接回传给智能体）。
+        ``on_block="return"`` 返回结构化拒绝对话（更适合直接回传给智能体）；
+        ``on_block="deceive"`` 在 deception 启用且投放了诱饵时返回假内容——
+        攻击方以为得手，实则已被标记（理论 P4）。
         """
 
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -441,9 +485,9 @@ class Guard:
                 )
                 decision = self.evaluate(action)
                 if not decision.allowed:
-                    if on_block == "return":
-                        if decision.decoy is not None:
-                            return decision.decoy  # 诱饵投放：攻击方"拿到"假内容，实则已被标记
+                    if on_block == "deceive" and decision.decoy is not None:
+                        return decision.decoy  # 理论 P4：攻击方"拿到"假内容，实则已被标记
+                    if on_block in ("return", "deceive"):
                         return {
                             "blocked": True,
                             "verdict": decision.verdict.value,
@@ -587,7 +631,7 @@ class GuardedShell:
         command: str,
         *,
         timeout: Optional[float] = None,
-        on_block: str = "raise",
+        on_block: str = "raise",  # raise / return / deceive（deception 启用时回放假输出）
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         approver: Optional[Approver] = None,
@@ -595,7 +639,17 @@ class GuardedShell:
         command = str(command)
         decision = self.check(command, approver=approver)
         if not decision.allowed:
-            if on_block == "return":
+            if on_block == "deceive" and decision.decoy is not None:
+                # 理论 P4：向攻击方回放假输出——它看到"执行成功"，拿到的是假凭据；
+                # 判定与审计仍按真实情况记录（decoy / findings 完整保留）。
+                return ShellResult(
+                    blocked=False,
+                    command=command,
+                    decision=decision,
+                    returncode=0,
+                    stdout=decision.decoy,
+                )
+            if on_block in ("return", "deceive"):
                 return ShellResult(blocked=True, command=command, decision=decision)
             raise SessionFrozen(decision) if decision.frozen else ActionBlocked(decision)
         try:

@@ -3,7 +3,7 @@
 [![CI](https://github.com/l1Ha/AntiAI/actions/workflows/ci.yml/badge.svg)](https://github.com/l1Ha/AntiAI/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-275%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-284%20passing-brightgreen)
 
 **在 AI / 智能体与真实世界之间，加一层不可绕过的行为护栏——不止挡住，还要还击。**
 
@@ -146,8 +146,11 @@ antiai decoy snippet                                       # 生成可注入上�
 ```
 
 开启后，**被阻止的窃取动作会"拿到"一份假凭据**（内嵌新 canary 并登记）——
-攻击方以为得手，实则每一步都已被标记。配合 `on_block="return"` 的工具装饰器，
-智能体拿到的是诱饵内容；它一旦外发，内容级溯源立即命中。
+攻击方以为得手，实则每一步都已被标记。两种窃取形态都覆盖：
+file 工具读路径，与 shell 命令窃取（`cat ~/.env`，按诱饵文件名匹配命令文本）。
+配合工具装饰器的 `on_block="deceive"`（或 `guard.shell().run(..., on_block="deceive")`），
+智能体拿到的是诱饵内容、看到"执行成功"；它一旦外发，内容级溯源立即命中。
+设计推导见 THEORY.md §P4。
 
 > 反制动作只作用于**你自己的部署**（当前会话 / 被管进程 / 本机文件）。
 > 本机制不用于、也不得用于对第三方系统的报复性操作。
@@ -391,7 +394,7 @@ ANTIAI 是**应用层行为护栏**，不是操作系统级沙箱的替代品。
 
 ```bash
 pip install -e ".[dev]"
-pytest                      # 275 个用例：策略 / 检测器 / 审计链 / 冻结封锁 / 反制 / 蜜罐 / 假情报 / CLI / 演示
+pytest                      # 284 个用例：策略 / 检测器 / 审计链 / 冻结封锁 / 反制 / 蜜罐 / 假情报 / 诱饵回放 / 理论符合性 / CLI / 演示
 ruff check antiai tests examples   # 静态检查（CI 同款，需 `pip install ruff`）
 ```
 
@@ -415,7 +418,7 @@ antiai/
 └── cli.py          # 命令行入口
 ```
 
-详细设计见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+详细设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，设计公理与性质的完整推导见 [THEORY.md](THEORY.md)。
 
 ---
 

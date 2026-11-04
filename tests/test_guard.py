@@ -9,7 +9,7 @@ import pytest
 from antiai.audit import AuditLog
 from antiai.errors import ActionBlocked, SessionFrozen
 from antiai.guard import Guard
-from antiai.models import Verdict
+from antiai.models import Severity, Verdict
 
 
 @pytest.fixture
@@ -325,7 +325,7 @@ class TestDeception:
         policy = policy_factory(deception={"enabled": True, "decoys": {"**/.env": "env"}})
         guard = Guard(policy, state_dir=state_dir, session_id="d")
 
-        @guard.tool("file.read", on_block="return")
+        @guard.tool("file.read", on_block="deceive")  # 攻击方以为得手
         def read_file(path: str) -> str:
             return "REAL SECRET"
 
@@ -386,3 +386,83 @@ class TestCountermeasuresInPipeline:
         )
         assert result.blocked and result.decision is not None
         assert result.decision.verdict is Verdict.BLOCK
+
+
+class TestStateDirAutoProtection:
+    """公理 A5（状态不可绕过）：无论 state-dir 指到哪里，护栏自身资产自动受守卫。"""
+
+    def test_state_dir_injected_into_protected_paths(self, state_dir: Path) -> None:
+        guard = Guard(state_dir=state_dir, session_id="s")
+        joined = " ".join(guard.policy.protected_paths)
+        assert f"{state_dir}/**" in joined
+
+    def test_destroying_state_dir_hits_tamper(self, guard: Guard, state_dir: Path) -> None:
+        decision = guard.evaluate(_shell(f"rm -rf {state_dir}"))
+        assert not decision.allowed
+        assert any(
+            finding.detector == "tamper" and finding.severity is Severity.CRITICAL
+            for finding in decision.findings
+        )
+
+    def test_writing_guard_audit_file_hits_tamper(self, guard: Guard, state_dir: Path) -> None:
+        decision = guard.evaluate(
+            {"tool": "file.write", "args": {"path": str(state_dir / "audit" / "x.jsonl")}}
+        )
+        assert not decision.allowed
+        assert any(finding.detector == "tamper" for finding in decision.findings)
+
+
+class TestAuditFailureClosed:
+    """公理 A4（审计完备性）：审计不可用时不放行。"""
+
+    def test_audit_failure_blocks_benign_action(self, guard: Guard, monkeypatch) -> None:
+        from antiai.errors import AuditError
+
+        def broken_append(self, *args, **kwargs):
+            raise AuditError("磁盘已满（模拟）")
+
+        monkeypatch.setattr("antiai.audit.AuditLog.append", broken_append)
+        decision = guard.evaluate(_read("/tmp/notes.md"))
+        assert decision.verdict is Verdict.BLOCK and not decision.allowed
+        assert any(finding.detector == "audit" for finding in decision.findings)
+        assert any("审计" in reason for reason in decision.reasons)
+
+    def test_audit_failure_keeps_block_verdict(self, guard: Guard, monkeypatch) -> None:
+        from antiai.errors import AuditError
+
+        def broken_append(self, *args, **kwargs):
+            raise AuditError("x")
+
+        monkeypatch.setattr("antiai.audit.AuditLog.append", broken_append)
+        decision = guard.evaluate(_shell("pkill -f antiai-guard"))
+        assert not decision.allowed and decision.verdict is Verdict.BLOCK
+        assert any(finding.detector == "audit" for finding in decision.findings)
+
+    def test_explicit_audit_off_is_not_failure(self, policy, state_dir: Path) -> None:
+        guard = Guard(policy, state_dir=state_dir, audit=False, session_id="s")
+        assert guard.evaluate(_read("/tmp/notes.md")).allowed
+
+
+class TestShellDecoy:
+    """理论 P4（欺骗的不对称性）：shell 窃取形态同样拿到诱饵，可"假装成功"。"""
+
+    def test_shell_theft_gets_decoy(self, policy_factory, state_dir: Path) -> None:
+        policy = policy_factory(deception={"enabled": True, "decoys": {"**/.env": "env"}})
+        guard = Guard(policy, state_dir=state_dir, session_id="d")
+        decision = guard.evaluate(_shell("cat /home/me/project/.env"))
+        assert not decision.allowed
+        assert decision.decoy is not None and "antiai-canary-" in decision.decoy
+
+    def test_guarded_shell_deceive_mode(self, policy_factory, state_dir: Path) -> None:
+        policy = policy_factory(deception={"enabled": True, "decoys": {"**/.env": "env"}})
+        guard = Guard(policy, state_dir=state_dir, session_id="d")
+        result = guard.shell().run("cat /home/me/project/.env", on_block="deceive")
+        assert result.blocked is False  # 攻击方看到"执行成功"
+        assert "antiai-canary-" in result.stdout  # 但拿到的是假凭据
+        assert result.decision is not None and result.decision.decoy is not None
+        # 审计仍真实记录（review 判定不因回放而改变）
+        assert guard.status()["audit_counts"]["verdicts"].get("review", 0) >= 1
+
+    def test_deceive_without_decoy_falls_back(self, guard: Guard) -> None:
+        result = guard.shell().run("ls -la", on_block="deceive")
+        assert result.blocked is True  # 无诱饵可用 → 退回普通阻止

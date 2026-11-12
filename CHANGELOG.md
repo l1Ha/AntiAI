@@ -4,6 +4,21 @@
 
 ---
 
+## [0.4.1] - 2026-11-12
+
+### 新增
+- **`@guard.tool` 支持 `approver`**：review 类工具获得与 `evaluate` 一致的人工
+  批准通道（未提供时 review 一律不放行，公理 A1 失败封闭语义）。
+- **`examples/agent_integration.py`**：真实 Agent 对话循环接入示例（OpenAI
+  Function Calling 形态 → 护栏判定 → 拒绝对话回传给智能体 → 人工审批），
+  不依赖任何 API Key 即可运行。
+- **`examples/demo_agent.py` 支持 `--aggressive`**：同一示例可演示防御与主动
+  反制两种模式。
+- README 新增"集成到真实 Agent"接入姿势与 eval-json 协议说明，四个示例索引
+  整理进"集成方式"章节（修复章节重复）。
+
+---
+
 ## [0.4.0] - 2026-11-04
 
 ### 新增：设计理论（THEORY.md）

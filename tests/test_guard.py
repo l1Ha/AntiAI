@@ -466,3 +466,38 @@ class TestShellDecoy:
     def test_deceive_without_decoy_falls_back(self, guard: Guard) -> None:
         result = guard.shell().run("ls -la", on_block="deceive")
         assert result.blocked is True  # 无诱饵可用 → 退回普通阻止
+
+
+class TestToolApprover:
+    """@guard.tool 的 review 工具必须有与 evaluate 一致的批准通道。"""
+
+    def test_review_tool_without_approver_is_refused(self, guard: Guard) -> None:
+        @guard.tool("mystery.tool", on_block="return")
+        def mystery() -> str:
+            return "ran"
+
+        result = mystery()
+        assert isinstance(result, dict) and result["blocked"] is True
+        assert result["verdict"] == "review"
+
+    def test_review_tool_with_approver_runs(self, guard: Guard) -> None:
+        calls = []
+
+        def approve(action, reasons):
+            calls.append(reasons)
+            return True
+
+        @guard.tool("mystery.tool", on_block="return", approver=approve)
+        def mystery() -> str:
+            return "ran"
+
+        assert mystery() == "ran"
+        assert calls and calls[0]  # 批准回调收到了依据
+
+    def test_approver_denial_keeps_structured_refusal(self, guard: Guard) -> None:
+        @guard.tool("mystery.tool", on_block="return", approver=lambda a, r: False)
+        def mystery() -> str:
+            return "ran"
+
+        result = mystery()
+        assert isinstance(result, dict) and result["blocked"] is True

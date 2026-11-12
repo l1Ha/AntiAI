@@ -220,6 +220,25 @@ print(result.stdout.strip())
 
 ## 集成方式
 
+### 0. 对话循环内联判定（推荐的标准接入）
+
+OpenAI Function Calling 或任意形态：每个 tool_call 先过护栏，拒绝对话作为
+tool 结果回传给智能体（不抛异常，智能体据此自行调整）；review 走人工批准
+回调。完整可运行示例：[examples/agent_integration.py](examples/agent_integration.py)。
+
+```python
+decision = guard.evaluate(
+    {"function": {"name": name, "arguments": arguments_json}},
+    approver=human_approve,
+)
+if decision.allowed:
+    result = TOOLS[name](**args)
+else:
+    tool_result = json.dumps({"error": "action_blocked_by_guardrail",
+                              "reason": decision.reason_text[:120]},
+                             ensure_ascii=False)
+```
+
 ### 1. 装饰器：给工具函数套护栏
 
 ```python
@@ -229,7 +248,9 @@ def write_file(path: str, content: str) -> str:
 ```
 
 `on_block="raise"`（默认）抛 `ActionBlocked` / `SessionFrozen`；`"return"` 返回
-`{"blocked": True, "reason": ..., "decision": {...}}`。
+`{"blocked": True, "reason": ..., "decision": {...}}`；`"deceive"` 在 deception
+启用且投放了诱饵时返回假内容（理论 P4）。review 类工具可用
+`approver=...` 提供人工批准回调（未提供时 review 一律不放行）。
 
 ### 2. 受管 Shell
 
@@ -237,6 +258,7 @@ def write_file(path: str, content: str) -> str:
 shell = guard.shell(timeout=10)
 shell.check("rm -rf ~/.antiai")                                # 只判定不执行 → block
 shell.run("ls -la", approver=lambda action, reasons: True)     # 人工确认后执行
+shell.run("cat ~/.env", on_block="deceive")                    # deception 启用时：回放假输出
 ```
 
 ### 3. 旁路模式（任意语言 / 任意 Agent 框架）
@@ -247,16 +269,24 @@ shell.run("ls -la", approver=lambda action, reasons: True)     # 人工确认后
 echo '{"tool":"shell.exec","args":{"command":"sudo rm -rf /var/log"}}' | antiai eval-json
 ```
 
-### 4. 接入 OpenAI Function Calling 形态
+输入支持三种形态（可混用）：`{"tool": "...", "args": {...}}`、
+`{"function": {"name": ..., "arguments": "{...}"}}`（OpenAI 形态）、
+`"一条 shell 命令"`（字符串视为 shell.exec）。
+输出判定对象含：`verdict`（allow/review/block）、`allowed`、`frozen`、
+`requires_approval`、`reasons`、`findings`、`matched_rules`、`countermeasures`。
 
-`guard.evaluate` / `eval-json` 直接接受 `{"function": {"name": ..., "arguments": "{...}"}}`；
-也接受裸字符串（视为 Shell 命令）。参数中的 `command` / `path` / `host` 会被自动提取。
-
-### 5. 人工确认（review）
+### 4. 人工确认（review）
 
 ```python
 decision = guard.evaluate(action, approver=lambda action, reasons: input(f"批准？{reasons} ") == "y")
 ```
+
+拒绝默认安全：无 approver 或批准回调返回 False / 抛异常时一律不放行。
+
+**可运行示例**：[quickstart.py](examples/quickstart.py)（最小接入）、
+[agent_integration.py](examples/agent_integration.py)（真实对话循环）、
+[aggressive_setup.py](examples/aggressive_setup.py)（反制钩子接线）、
+[decoy_showcase.py](examples/decoy_showcase.py)（假情报全链路）。
 
 ## 策略文件
 

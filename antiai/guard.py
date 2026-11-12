@@ -464,13 +464,22 @@ class Guard:
 
     # ------------------------------------------------------------------ 工具封装
 
-    def tool(self, name: Optional[str] = None, *, on_block: str = "raise"):
+    def tool(
+        self,
+        name: Optional[str] = None,
+        *,
+        on_block: str = "raise",
+        approver: Optional[Approver] = None,
+    ):
         """装饰器：给 Python 工具函数套上护栏。
 
         ``on_block="raise"``（默认）在阻止时抛 ``ActionBlocked``；
         ``on_block="return"`` 返回结构化拒绝对话（更适合直接回传给智能体）；
         ``on_block="deceive"`` 在 deception 启用且投放了诱饵时返回假内容——
         攻击方以为得手，实则已被标记（理论 P4）。
+
+        ``approver``：review 判定的人工批准回调（签名与 :meth:`evaluate` 相同）。
+        未提供时 review 一律不放行（公理 A1 的失败封闭语义）。
         """
 
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -483,7 +492,7 @@ class Guard:
                 action = enrich_action(
                     Action(tool=tool_name, args=snapshot, session_id=self.session_id, raw=kwargs)
                 )
-                decision = self.evaluate(action)
+                decision = self.evaluate(action, approver=approver)
                 if not decision.allowed:
                     if on_block == "deceive" and decision.decoy is not None:
                         return decision.decoy  # 理论 P4：攻击方"拿到"假内容，实则已被标记
